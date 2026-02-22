@@ -2,7 +2,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 import os
 from dotenv import load_dotenv
 from sqlalchemy import select
@@ -26,6 +26,13 @@ if not BOT_TOKEN:
     exit(1)
 
 bot = Bot(token=BOT_TOKEN)
+async def set_bot_commands():
+    """Устанавливает команды бота - только /start"""
+    commands = [
+        BotCommand(command="start", description="🚗 Запустить бота"),
+        # ВСЁ! Больше никаких команд
+    ]
+    await bot.set_my_commands(commands)
 dp = Dispatcher()
 
 # Подключаем роутеры
@@ -139,6 +146,8 @@ async def cmd_help(message: Message):
     )
 
 async def main():
+    # Устанавливаем команды бота
+    await set_bot_commands()  # ← ДОБАВЬ ЭТУ СТРОКУ!
     # Инициализация базы данных
     await init_db()
     print("🚀 Бот запускается...")
