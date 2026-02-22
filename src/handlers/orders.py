@@ -1,0 +1,505 @@
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy import select
+from datetime import datetime
+
+from src.database import AsyncSessionLocal
+from src.models import User, UserRole, Order, OrderStatus
+from src.keyboards.main import get_cancel_keyboard, get_passenger_main_menu, get_driver_main_menu
+
+router = Router()
+
+# Состояния для создания заказа
+class OrderStates(StatesGroup):
+    waiting_for_from = State()      # Откуда
+    waiting_for_to = State()         # Куда
+    waiting_for_date = State()       # Дата
+    waiting_for_time = State()       # Время
+    waiting_for_price = State()      # Цена
+    waiting_for_seats = State()      # Количество мест (только для водителя)
+    waiting_for_back_seats = State() # Мест на заднем ряду (только для водителя)
+
+# ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТМЕНЫ ==========
+async def check_cancel(message: Message, state: FSMContext) -> bool:
+    """Проверяет, не нажата ли кнопка отмены"""
+    if message.text == "❌ Отмена":
+        await cancel_order(message, state)
+        return True
+    return False
+# ======================================================
+
+@router.message(F.text == "📝 Разместить заказ")
+async def cmd_create_order(message: Message, state: FSMContext, **kwargs):
+    """Начало создания заказа"""
+    
+    # Проверяем регистрацию и получаем роль
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            await message.answer("❌ Сначала зарегистрируйтесь!")
+            return
+        
+        # Проверяем, что это водитель
+        if user.role != UserRole.DRIVER:
+            await message.answer("❌ Только водители могут размещать заказы!")
+            return
+    
+    # Сохраняем роль пользователя в состояние
+    await state.update_data(role=user.role)
+    
+    # Начинаем сбор данных
+    await message.answer(
+        "📍 **Создание заказа**\n\n"
+        "Введите **город отправления**:\n"
+        "(Например: Уфа, Стерлитамак, Салават)",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_from)
+
+@router.message(OrderStates.waiting_for_from)
+async def process_from(message: Message, state: FSMContext):
+    """Обработка города отправления"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    from_city = message.text.strip()
+    
+    # Проверяем, что город не пустой
+    if not from_city:
+        await message.answer(
+            "❌ Город отправления не может быть пустым!\n"
+            "Введите название населенного пункта:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Проверяем минимальную длину (например, "Уфа" - 3 символа)
+    if len(from_city) < 3:
+        await message.answer(
+            "❌ Название города слишком короткое!\n"
+            "Введите корректное название:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(from_city=from_city)
+    
+    await message.answer(
+        "📍 Введите **город назначения**:\n"
+        "(Например: Акъяр, Магнитогорск, Сибай)",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_to)
+
+@router.message(OrderStates.waiting_for_to)
+async def process_to(message: Message, state: FSMContext):
+    """Обработка города назначения"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    to_city = message.text.strip()
+    
+    # Проверяем, что город не пустой
+    if not to_city:
+        await message.answer(
+            "❌ Город назначения не может быть пустым!\n"
+            "Введите название населенного пункта:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    if len(to_city) < 3:
+        await message.answer(
+            "❌ Название города слишком короткое!\n"
+            "Введите корректное название:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Проверяем, что города разные
+    data = await state.get_data()
+    if to_city.lower() == data.get('from_city', '').lower():
+        await message.answer(
+            f"❌ Город назначения ('{to_city}') совпадает с городом отправления ('{data.get('from_city')}')!\n"
+            "Введите другой город назначения:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(to_city=to_city)
+    
+    await message.answer(
+        "📅 Введите **дату поездки** в формате ДД.ММ.ГГГГ\n"
+        "Например: 25.12.2026\n\n"
+        "⚠️ Дата должна быть не раньше сегодняшнего дня",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_date)
+
+@router.message(OrderStates.waiting_for_date)
+async def process_date(message: Message, state: FSMContext):
+    """Обработка даты"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    date_str = message.text.strip()
+    
+    try:
+        # Пробуем распарсить дату
+        date = datetime.strptime(date_str, "%d.%m.%Y")
+        
+        # Проверяем, что дата не в прошлом
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if date < today:
+            await message.answer(
+                "❌ Дата не может быть в прошлом!\n"
+                "Введите будущую дату:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+            
+        await state.update_data(date=date)
+        
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат даты!\n"
+            "Используйте формат ДД.ММ.ГГГГ\n"
+            "Например: 25.12.2026",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await message.answer(
+        "⏰ Введите **время поездки** в формате ЧЧ:ММ\n"
+        "Например: 09:30",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_time)
+
+@router.message(OrderStates.waiting_for_time)
+async def process_time(message: Message, state: FSMContext):
+    """Обработка времени"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    time_str = message.text.strip()
+    
+    # Проверка формата ЧЧ:ММ
+    if len(time_str) != 5 or time_str[2] != ":":
+        await message.answer(
+            "❌ Неверный формат времени!\n"
+            "Используйте формат ЧЧ:ММ\n"
+            "Например: 09:30",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Проверяем, что часы и минуты - числа
+    try:
+        hours = int(time_str[:2])
+        minutes = int(time_str[3:])
+        if hours < 0 or hours > 23 or minutes < 0 or minutes > 59:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            "❌ Неверное время!\n"
+            "Часы (00-23) и минуты (00-59)\n"
+            "Например: 09:30",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Объединяем дату и время
+    data = await state.get_data()
+    date = data.get('date')
+    
+    # Создаем datetime объект с датой и временем
+    combined_datetime = datetime(
+        year=date.year,
+        month=date.month,
+        day=date.day,
+        hour=hours,
+        minute=minutes
+    )
+    await state.update_data(date=combined_datetime)
+    
+    # Получаем роль из состояния
+    data = await state.get_data()
+    role = data.get('role')
+    
+    if role == UserRole.DRIVER:
+        # Для водителя спрашиваем цену за одного пассажира
+        await message.answer(
+            "💰 Введите **стоимость поездки для одного пассажира** (в рублях):\n"
+            "Например: 500",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+    else:
+        # Для пассажира спрашиваем общую цену
+        await message.answer(
+            "💰 Введите **общую стоимость поездки** (в рублях):\n"
+            "Например: 500",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+    
+    await state.set_state(OrderStates.waiting_for_price)
+
+@router.message(OrderStates.waiting_for_price)
+async def process_price(message: Message, state: FSMContext):
+    """Обработка цены"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    try:
+        price = int(message.text.strip())
+        if price <= 0:
+            await message.answer(
+                "❌ Цена должна быть больше 0!\n"
+                "Введите корректную сумму:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+    except ValueError:
+        await message.answer(
+            "❌ Введите число (сумму в рублях)",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(price=price)
+    
+    # Получаем роль
+    data = await state.get_data()
+    role = data.get('role')
+    
+    if role == UserRole.DRIVER:
+        # Для водителя спрашиваем количество мест
+        await message.answer(
+            "🪑 Сколько **всего мест** в машине?\n"
+            "Введите число (например: 4, 5, 7):",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(OrderStates.waiting_for_seats)
+    else:
+        # Для пассажира пока недоступно (только водители)
+        await message.answer("❌ Функция для пассажиров в разработке")
+
+@router.message(OrderStates.waiting_for_seats)
+async def process_seats(message: Message, state: FSMContext):
+    """Обработка количества мест (для водителя)"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    try:
+        seats = int(message.text.strip())
+        
+        if seats <= 0:
+            await message.answer(
+                "❌ Количество мест должно быть больше 0!\n"
+                "Введите корректное число:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+        
+        if seats > 20:  # Разумное ограничение
+            await message.answer(
+                "❌ Слишком много мест! Максимум 20.\n"
+                "Введите корректное число:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+            
+    except ValueError:
+        await message.answer(
+            "❌ Введите число (количество мест)",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(total_seats=seats)
+    
+    await message.answer(
+        f"🪑 Сколько **мест на заднем ряду**?\n"
+        f"Всего мест: {seats}\n"
+        f"⚠️ Значение должно быть меньше общего количества мест:",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_back_seats)
+
+@router.message(OrderStates.waiting_for_back_seats)
+async def process_back_seats(message: Message, state: FSMContext):
+    """Обработка мест на заднем ряду"""
+    # Проверка отмены
+    if await check_cancel(message, state):
+        return
+    
+    try:
+        back_seats = int(message.text.strip())
+        
+        # Получаем общее количество мест
+        data = await state.get_data()
+        total_seats = data.get('total_seats', 0)
+        
+        # Проверяем, что места на заднем ряду меньше общего количества
+        if back_seats <= 0:
+            await message.answer(
+                "❌ Количество мест должно быть больше 0!\n"
+                "Введите корректное число:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+            
+        if back_seats >= total_seats:
+            await message.answer(
+                f"❌ Мест на заднем ряду ({back_seats}) должно быть меньше общего количества мест ({total_seats})!\n"
+                f"Введите число меньше {total_seats}:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+            
+    except ValueError:
+        await message.answer(
+            "❌ Введите число",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(back_seats=back_seats)
+    
+    # Получаем роль
+    data = await state.get_data()
+    role = data.get('role')
+    
+    await save_order(message, state, role)
+
+async def save_order(message: Message, state: FSMContext, role: UserRole):
+    """Сохранение заказа в базу данных"""
+    data = await state.get_data()
+    
+    # Проверяем обязательные поля
+    required_fields = ['from_city', 'to_city', 'date', 'price']
+    if role == UserRole.DRIVER:
+        required_fields.append('total_seats')
+    
+    for field in required_fields:
+        if field not in data:
+            await message.answer(f"❌ Ошибка: не хватает данных {field}")
+            await state.clear()
+            return
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем пользователя
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = user_result.scalar_one()
+        
+        # Создаем заказ
+        order = Order(
+            order_type=role,
+            from_city=data['from_city'],
+            to_city=data['to_city'],
+            date=data['date'],  # дата уже включает время
+            price=data['price'],
+            customer_id=user.id,
+            status=OrderStatus.ACTIVE
+        )
+        
+        # Добавляем поля для водителя
+        if role == UserRole.DRIVER:
+            order.total_seats = data['total_seats']
+            order.booked_seats = 0  # Изначально свободно
+            # seats_back_row больше не используется
+        
+        session.add(order)
+        await session.commit()
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Формируем текст подтверждения
+    if role == UserRole.DRIVER:
+        confirmation_text = (
+            f"✅ **Заказ водителя успешно создан!**\n\n"
+            f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
+            f"📅 Дата: {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"💰 Цена за пассажира: {data['price']} руб.\n"
+            f"🪑 Всего мест: {data['total_seats']}\n"
+            f"🪑 Мест на заднем ряду: {data['back_seats']}\n\n"
+            f"🔍 Теперь пассажиры смогут найти ваше предложение!"
+        )
+        menu = get_driver_main_menu()
+    else:
+        confirmation_text = (
+            f"✅ **Заказ пассажира успешно создан!**\n\n"
+            f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
+            f"📅 Дата: {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"💰 Общая стоимость: {data['price']} руб.\n\n"
+            f"🔍 Теперь водители смогут найти ваш заказ!"
+        )
+        menu = get_passenger_main_menu()
+    
+    await message.answer(
+        confirmation_text,
+        parse_mode="Markdown",
+        reply_markup=menu
+    )
+
+@router.message(F.text == "❌ Отмена")
+async def cancel_order(message: Message, state: FSMContext):
+    """Отмена создания заказа и возврат в главное меню"""
+    await state.clear()
+    
+    # Проверяем, зарегистрирован ли пользователь
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        
+        if user:
+            # Если пользователь зарегистрирован, показываем его меню
+            if user.role == UserRole.DRIVER:
+                await message.answer(
+                    "❌ Создание заказа отменено.\n\n"
+                    "🚗 **Главное меню водителя**",
+                    parse_mode="Markdown",
+                    reply_markup=get_driver_main_menu()
+                )
+            else:
+                await message.answer(
+                    "❌ Создание заказа отменено.\n\n"
+                    "👤 **Главное меню пассажира**",
+                    parse_mode="Markdown",
+                    reply_markup=get_passenger_main_menu()
+                )
+        else:
+            # Если пользователь не зарегистрирован, показываем общее меню
+            from src.keyboards.main import get_main_menu
+            await message.answer(
+                "❌ Создание заказа отменено.\n\n"
+                "👋 **Главное меню**",
+                parse_mode="Markdown",
+                reply_markup=get_main_menu()
+            )

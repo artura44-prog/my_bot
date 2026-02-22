@@ -1,0 +1,41 @@
+# Environment variables - СЕКРЕТЫ! НЕ КОММИТИТЬ!
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+data/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups - бэкапы с данными
+backups/
+*.tar.gz
+*.sql
+*.sql.gz
+
+# Тестовые файлы
+test_*.py
+!test_bot.py  # исключение - если нужен в репозитории
