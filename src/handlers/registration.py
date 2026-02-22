@@ -7,7 +7,7 @@ import re
 
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole
-from src.keyboards.main import get_passenger_main_menu, get_driver_main_menu, get_cancel_keyboard
+from src.keyboards.main import get_passenger_main_menu, get_driver_main_menu, get_cancel_keyboard, get_main_menu
 from src.utils.encryption import phone_encryptor
 router = Router()
 
@@ -62,18 +62,48 @@ async def cmd_register(message: Message, state: FSMContext):
 @router.message(RegistrationStates.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
     """Обработка имени"""
-    name = message.text.strip()
-    
-    if len(name) < 2 or len(name) > 100:
-        await message.answer("❌ Имя должно быть от 2 до 100 символов. Попробуйте снова:")
+    # Проверка на отмену
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer(
+            "❌ Регистрация отменена.",
+            reply_markup=get_main_menu()
+        )
         return
     
+    name = message.text.strip()
+    
+    # Более мягкая проверка имени
+    if len(name) < 2:
+        await message.answer(
+            "❌ Имя должно содержать минимум 2 символа. Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    if len(name) > 100:
+        await message.answer(
+            "❌ Имя слишком длинное (максимум 100 символов). Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Проверка, что имя не состоит только из пробелов
+    if not name.replace(' ', '').isalnum() and not all(x.isalpha() or x.isspace() for x in name):
+        await message.answer(
+            "❌ Имя может содержать только буквы и пробелы. Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Сохраняем имя
     await state.update_data(full_name=name)
     
-    # Кнопка для отправки телефона
+    # Запрашиваем телефон с кнопкой отмены
     phone_keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📱 Отправить телефон", request_contact=True)]
+            [KeyboardButton(text="📱 Отправить телефон", request_contact=True)],
+            [KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
@@ -86,33 +116,16 @@ async def process_name(message: Message, state: FSMContext):
     )
     await state.set_state(RegistrationStates.waiting_for_phone)
 
-@router.message(RegistrationStates.waiting_for_phone, F.contact)
-async def process_phone_contact(message: Message, state: FSMContext):
-    """Обработка телефона через контакт"""
-    phone = message.contact.phone_number
-    await state.update_data(phone=phone)
-    
-    # Предлагаем выбрать роль
-    role_keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👤 Пассажир")],
-            [KeyboardButton(text="🚗 Водитель")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
-    await message.answer(
-        "✅ Телефон получен!\n\n"
-        "Выберите вашу роль:",
-        reply_markup=role_keyboard
-    )
-    await state.set_state(RegistrationStates.waiting_for_role)
-
 @router.message(RegistrationStates.waiting_for_phone)
 async def process_phone_text(message: Message, state: FSMContext):
     """Обработка телефона из текстового сообщения"""
-    phone = message.text.strip()
+    # Проверка на отмену
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Регистрация отменена.", reply_markup=get_main_menu())
+        return
+    
+    phone = message.text.strip()  # ← ЭТОЙ СТРОКИ НЕ ХВАТАЛО!
     
     if not validate_phone(phone):
         await message.answer(
