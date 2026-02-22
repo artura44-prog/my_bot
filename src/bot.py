@@ -37,7 +37,7 @@ dp.include_router(search.router)
 
 @dp.message(Command("start"))
 @rate_limit("start")  # 5 раз в минуту
-async def cmd_start(message: Message):
+async def cmd_start(message: Message,  **kwargs):
     """Обработчик команды /start - показывает главное меню"""
     print(f"🔍 /start от пользователя {message.from_user.id}")
     print(f"👤 Username: {message.from_user.username}")
@@ -94,7 +94,7 @@ async def handle_car_button(message: Message, **kwargs):
 
 @dp.message(lambda message: message.text == "📞 Поддержка")
 @rate_limit("support")  # 5 раз в минуту
-async def handle_support(message: Message):
+async def handle_support(message: Message,  **kwargs):
     """Обработчик кнопки Поддержка (доступна без регистрации)"""
     await message.answer(
         "📞 **Поддержка**\n\n"
@@ -106,7 +106,7 @@ async def handle_support(message: Message):
 
 @dp.message(lambda message: message.text == "📝 Регистрация")
 @rate_limit("register")  # 5 раз в час
-async def handle_register_button(message: Message):
+async def handle_register_button(message: Message, **kwargs):
     """Обработчик кнопки Регистрация"""
     is_registered = await check_registration(message)
     
