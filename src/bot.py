@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import select
 
-from src.handlers import registration, profile, orders, passenger_trips, search
+from src.handlers import registration, profile, orders, passenger_trips, search, driver_orders
 from src.handlers.check_auth import check_registration, get_user_role, registration_required
 from src.database import init_db, AsyncSessionLocal
 from src.models import User, UserRole
@@ -41,6 +41,7 @@ dp.include_router(profile.router)
 dp.include_router(orders.router)
 dp.include_router(passenger_trips.router)
 dp.include_router(search.router)
+dp.include_router(driver_orders.router) 
 
 @dp.message(Command("start"))
 @rate_limit("start")  # 5 раз в минуту
