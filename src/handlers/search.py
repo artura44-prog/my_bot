@@ -1,5 +1,8 @@
 from aiogram import Router, F
+from aiogram.filters import Command 
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton  # ← ДОБАВЛЕНО!
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from datetime import datetime
 
@@ -8,6 +11,11 @@ from src.models import User, UserRole, Order, OrderStatus
 from src.utils.encryption import phone_encryptor
 
 router = Router()
+
+# Состояния для отправки сообщения водителю
+class MessageStates(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_driver_reply = State() 
 
 @router.message(F.text == "🔍 Найти попутчика")
 async def search_passenger(message: Message, **kwargs):
@@ -103,18 +111,19 @@ async def search_passenger(message: Message, **kwargs):
             count += 1
 
 @router.callback_query(lambda c: c.data.startswith("contact_driver:"))
-async def contact_driver(callback: CallbackQuery):
-    """Связаться с водителем"""
+async def contact_driver(callback: CallbackQuery, state: FSMContext):
+    """Начать диалог с водителем"""
     order_id = int(callback.data.split(":")[1])
     
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        # Получаем заказ
+        order_result = await session.execute(
             select(Order).where(Order.id == order_id)
         )
-        order = result.scalar_one_or_none()
+        order = order_result.scalar_one_or_none()
         
         if not order or not order.customer_id:
-            await callback.answer("❌ Водитель больше не доступен")
+            await callback.answer("❌ Водитель больше не доступен", show_alert=True)
             await callback.message.delete()
             return
         
@@ -125,25 +134,31 @@ async def contact_driver(callback: CallbackQuery):
         driver = driver_result.scalar_one_or_none()
         
         if not driver:
-            await callback.answer("❌ Водитель не найден")
+            await callback.answer("❌ Водитель не найден", show_alert=True)
             return
         
-        # Расшифровываем телефон водителя
-        try:
-            decrypted_phone = phone_encryptor.decrypt(driver.phone)
-        except:
-            decrypted_phone = "Ошибка расшифровки"
-        
-        # Показываем контакты водителя
-        contact_text = (
-            f"📞 **Контакты водителя**\n\n"
-            f"**Имя:** {driver.full_name}\n"
-            f"**Телефон:** `{decrypted_phone}`\n"  # ← РАСШИФРОВАННЫЙ!
-            f"**Рейтинг:** ⭐ {driver.rating:.1f}\n\n"
-            f"Свяжитесь с водителем для подтверждения поездки!"
+        # Сохраняем данные в состояние
+        await state.update_data(
+            driver_id=driver.telegram_id,
+            order_id=order_id,
+            from_city=order.from_city,
+            to_city=order.to_city,
+            date=order.date.strftime('%d.%m.%Y %H:%M')
         )
         
-        await callback.message.answer(contact_text, parse_mode="Markdown")
+        # Запрашиваем сообщение
+        await callback.message.answer(
+            f"📝 **Напишите сообщение водителю**\n\n"
+            f"🚗 Водитель: {driver.full_name}\n"
+            f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
+            f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"Например: 'Сможете заехать за мной по адресу...'\n"
+            f"Или отправьте /cancel для отмены",
+            parse_mode="Markdown"
+        )
+        
+        # Устанавливаем состояние ожидания сообщения
+        await state.set_state(MessageStates.waiting_for_message)
     
     await callback.answer()
 
@@ -213,3 +228,185 @@ async def book_seat(callback: CallbackQuery):
                     f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n"
                     f"🪑 Осталось мест: {order.available_seats}"
                 )
+
+@router.message(MessageStates.waiting_for_message)
+async def forward_message_to_driver(message: Message, state: FSMContext):
+    """Пересылает сообщение пассажира водителю"""
+    
+    # Получаем данные из состояния
+    data = await state.get_data()
+    driver_id = data.get('driver_id')
+    order_id = data.get('order_id')
+    from_city = data.get('from_city')
+    to_city = data.get('to_city')
+    date = data.get('date')
+    
+    if not driver_id:
+        await message.answer("❌ Ошибка: данные водителя потеряны")
+        await state.clear()
+        return
+    
+    # Получаем информацию о пассажире
+    async with AsyncSessionLocal() as session:
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await message.answer("❌ Сначала зарегистрируйтесь!")
+            await state.clear()
+            return
+    
+    # Формируем сообщение для водителя
+    driver_text = (
+        f"📬 **Новое сообщение от пассажира!**\n\n"
+        f"👤 **Пассажир:** {passenger.full_name}\n"
+        f"⭐ Рейтинг: {passenger.rating:.1f}\n"
+        f"📍 **Маршрут:** {from_city} → {to_city}\n"
+        f"📅 **Дата:** {date}\n\n"
+        f"📝 **Сообщение:**\n"
+        f"_{message.text}_\n\n"
+        f"💬 Нажмите на кнопку ниже, чтобы ответить"
+    )
+    
+    # Кнопка для ответа пассажиру
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Ответить пассажиру",
+                    callback_data=f"reply_to_passenger:{passenger.telegram_id}:{order_id}"
+                )
+            ]
+        ]
+    )
+    
+    # Отправляем сообщение водителю
+    try:
+        await message.bot.send_message(
+            driver_id,
+            driver_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        
+        await message.answer(
+            "✅ **Сообщение отправлено водителю!**\n"
+            "Когда он ответит, вы получите уведомление.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(
+            "❌ Не удалось отправить сообщение. Возможно, водитель заблокировал бота."
+        )
+    
+    # Очищаем состояние
+    await state.clear()
+
+@router.message(Command("cancel"), MessageStates.waiting_for_message)
+async def cancel_message(message: Message, state: FSMContext):
+    """Отмена отправки сообщения"""
+    await state.clear()
+    await message.answer("❌ Отправка сообщения отменена.")
+
+
+@router.callback_query(lambda c: c.data.startswith("reply_to_passenger:"))
+async def start_reply_to_passenger(callback: CallbackQuery, state: FSMContext):
+    """Начать ответ пассажиру (для водителя)"""
+    _, passenger_id, order_id = callback.data.split(":")
+    passenger_id = int(passenger_id)
+    order_id = int(order_id)
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем информацию о пассажире
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == passenger_id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Пассажир не найден", show_alert=True)
+            return
+        
+        # Получаем заказ
+        order_result = await session.execute(
+            select(Order).where(Order.id == order_id)
+        )
+        order = order_result.scalar_one_or_none()
+        
+        if not order:
+            await callback.answer("❌ Заказ не найден", show_alert=True)
+            return
+        
+        # Сохраняем данные в состояние
+        await state.update_data(
+            passenger_id=passenger_id,
+            passenger_name=passenger.full_name,
+            order_id=order_id,
+            from_city=order.from_city,
+            to_city=order.to_city
+        )
+        
+        await callback.message.answer(
+            f"✏️ **Напишите ответ пассажиру** {passenger.full_name}\n\n"
+            f"Введите ваше сообщение или отправьте /cancel для отмены",
+            parse_mode="Markdown"
+        )
+        
+        await state.set_state(MessageStates.waiting_for_driver_reply)
+    
+    await callback.answer()
+
+@router.message(MessageStates.waiting_for_driver_reply)
+async def forward_reply_to_passenger(message: Message, state: FSMContext):
+    """Пересылает ответ водителя пассажиру"""
+    
+    data = await state.get_data()
+    passenger_id = data.get('passenger_id')
+    passenger_name = data.get('passenger_name')
+    order_id = data.get('order_id')
+    from_city = data.get('from_city')
+    to_city = data.get('to_city')
+    
+    if not passenger_id:
+        await message.answer("❌ Ошибка: данные пассажира потеряны")
+        await state.clear()
+        return
+    
+    # Получаем информацию о водителе
+    async with AsyncSessionLocal() as session:
+        driver_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        driver = driver_result.scalar_one_or_none()
+    
+    # Формируем сообщение для пассажира
+    passenger_text = (
+        f"📬 **Ответ от водителя!**\n\n"
+        f"🚗 **Водитель:** {driver.full_name}\n"
+        f"⭐ Рейтинг: {driver.rating:.1f}\n"
+        f"📍 **Маршрут:** {from_city} → {to_city}\n\n"
+        f"📝 **Сообщение:**\n"
+        f"_{message.text}_"
+    )
+    
+    # Отправляем ответ пассажиру
+    try:
+        await message.bot.send_message(
+            passenger_id,
+            passenger_text,
+            parse_mode="Markdown"
+        )
+        
+        await message.answer(
+            "✅ **Ответ отправлен пассажиру!**",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(
+            "❌ Не удалось отправить ответ. Возможно, пассажир заблокировал бота."
+        )
+    
+    await state.clear()
