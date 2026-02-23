@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton  # ← ДОБАВЛЕНО!
 from sqlalchemy import select
 from datetime import datetime
 
@@ -81,15 +81,23 @@ async def search_passenger(message: Message, **kwargs):
             )
             
             # Кнопки для заказа
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
             keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="📞 Связаться с водителем", 
-                        callback_data=f"contact_driver:{order.id}"
-                    )]
-                ]
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Забронировать место", 
+                callback_data=f"book_seat:{order.id}"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📞 Связаться с водителем", 
+                callback_data=f"contact_driver:{order.id}"
+            )
+        ]
+    ]
+)
             
             await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
             count += 1
@@ -138,3 +146,70 @@ async def contact_driver(callback: CallbackQuery):
         await callback.message.answer(contact_text, parse_mode="Markdown")
     
     await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("book_seat:"))
+async def book_seat(callback: CallbackQuery):
+    """Бронирование места в заказе водителя"""
+    order_id = int(callback.data.split(":")[1])
+    passenger_id = callback.from_user.id
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем заказ
+        order_result = await session.execute(
+            select(Order).where(Order.id == order_id)
+        )
+        order = order_result.scalar_one_or_none()
+        
+        if not order:
+            await callback.answer("❌ Заказ не найден", show_alert=True)
+            return
+        
+        # Проверяем, есть ли свободные места
+        if order.available_seats <= 0:
+            await callback.answer("❌ Свободных мест нет", show_alert=True)
+            return
+        
+        # Получаем пассажира
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == passenger_id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Сначала зарегистрируйтесь", show_alert=True)
+            return
+        
+        # Проверяем, не забронировал ли уже
+        if order.booked_passengers and passenger.id in order.booked_passengers:
+            await callback.answer("❌ Вы уже забронировали место", show_alert=True)
+            return
+        
+        # Бронируем место
+        if not order.booked_passengers:
+            order.booked_passengers = []
+        order.booked_passengers.append(passenger.id)
+        order.booked_seats += 1
+        
+        await session.commit()
+        
+        await callback.answer(
+            "✅ Место успешно забронировано!",
+            show_alert=True
+        )
+        
+        # Уведомляем водителя
+        if order.customer_id:
+            driver_result = await session.execute(
+                select(User).where(User.id == order.customer_id)
+            )
+            driver = driver_result.scalar_one_or_none()
+            
+            if driver:
+                await callback.bot.send_message(
+                    driver.telegram_id,
+                    f"✅ **Новое бронирование!**\n\n"
+                    f"👤 Пассажир: {passenger.full_name}\n"
+                    f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
+                    f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"🪑 Осталось мест: {order.available_seats}"
+                )
