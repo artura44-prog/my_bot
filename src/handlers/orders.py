@@ -3,7 +3,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, Date  
+from sqlalchemy import select, Date, func
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
@@ -439,18 +439,18 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         )
         user = user_result.scalar_one()
         
+       
         # ДЛЯ ВОДИТЕЛЯ: проверяем, нет ли уже заказа на эту дату
         if role == UserRole.DRIVER:
-            # Получаем дату из данных (уже datetime объект)
             order_date = data['date']
             
-            # Ищем активные заказы на эту же дату
+            # Получаем дату без времени для сравнения
+            
             existing_order_result = await session.execute(
                 select(Order).where(
                     Order.customer_id == user.id,
                     Order.status == OrderStatus.ACTIVE,
-                    # Сравниваем по дате (без времени)
-                    Order.date.cast(Date) == order_date.cast(Date)
+                    func.date(Order.date) == order_date.date()  # ← ПРАВИЛЬНО!
                 )
             )
             existing_order = existing_order_result.scalar_one_or_none()

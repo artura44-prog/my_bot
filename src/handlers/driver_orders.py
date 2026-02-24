@@ -8,6 +8,13 @@ from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus
 from src.keyboards.main import get_driver_main_menu
 from src.utils.encryption import phone_encryptor
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
+
+# Состояния для отправки сообщения пассажиру
+class DriverMessageStates(StatesGroup):
+    waiting_for_message = State()
 
 router = Router()
 
@@ -40,7 +47,7 @@ async def my_orders(message: Message, **kwargs):
                 Order.date >= today
             ).order_by(Order.date)
         )
-        orders = orders_result.scalars().all()  # ← ВСЕ ЗАКАЗЫ, А НЕ ОДИН!
+        orders = orders_result.scalars().all()
         
         if not orders:
             await message.answer(
@@ -156,7 +163,7 @@ async def cancel_order(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data.startswith("contact_all_passengers:"))
 async def contact_all_passengers(callback: CallbackQuery):
-    """Связаться со всеми пассажирами (показать контакты)"""
+    """Связаться с пассажирами"""
     order_id = int(callback.data.split(":")[1])
     
     async with AsyncSessionLocal() as session:
@@ -169,8 +176,7 @@ async def contact_all_passengers(callback: CallbackQuery):
             await callback.answer("❌ Нет пассажиров", show_alert=True)
             return
         
-        text = "📞 **Контакты пассажиров**\n\n"
-        
+        # Отправляем отдельное сообщение для каждого пассажира
         for passenger_id in order.booked_passengers:
             passenger_result = await session.execute(
                 select(User).where(User.id == passenger_id)
@@ -178,17 +184,146 @@ async def contact_all_passengers(callback: CallbackQuery):
             passenger = passenger_result.scalar_one_or_none()
             
             if passenger:
+                # Расшифровываем телефон
                 try:
                     decrypted_phone = phone_encryptor.decrypt(passenger.phone)
                 except:
                     decrypted_phone = "Ошибка расшифровки"
                 
-                text += (
-                    f"👤 **{passenger.full_name}**\n"
-                    f"📞 `{decrypted_phone}`\n"
-                    f"⭐ Рейтинг: {passenger.rating:.1f}\n\n"
+                # Формируем ссылку на Telegram
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                
+                if passenger.username:
+                    # Если есть username - прямая ссылка
+                    tg_link = f"https://t.me/{passenger.username}"
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="✉️ Написать пассажиру",
+                                    url=tg_link
+                                )
+                            ]
+                        ]
+                    )
+                else:
+                    # Если нет username - отправка через бота
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="✉️ Написать через бота",
+                                    callback_data=f"write_to_passenger:{passenger.telegram_id}:{order.id}"
+                                )
+                            ]
+                        ]
+                    )
+                
+                # Карточка пассажира
+                text = (
+                    f"👤 **Пассажир**\n\n"
+                    f"**Имя:** {passenger.full_name}\n"
+                    f"**Телефон:** `{decrypted_phone}`\n"
+                    f"**Рейтинг:** ⭐ {passenger.rating:.1f}\n"
+                    f"**Telegram:** {'@' + passenger.username if passenger.username else 'нет username'}\n"
                 )
+                
+                await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         
-        await callback.message.answer(text, parse_mode="Markdown")
+        # Убираем кнопку "Назад к заказу" - просто отправляем уведомление
+        await callback.message.answer(
+            "✅ **Контакты пассажиров отправлены**\n\n"
+            "Выберите пассажира для связи:"
+        )
     
     await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("write_to_passenger:"))
+async def start_write_to_passenger(callback: CallbackQuery, state: FSMContext):
+    """Начать написание сообщения пассажиру через бота"""
+    _, passenger_id, order_id = callback.data.split(":")
+    passenger_id = int(passenger_id)
+    order_id = int(order_id)
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем информацию о пассажире
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == passenger_id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Пассажир не найден", show_alert=True)
+            return
+        
+        # Сохраняем данные в состояние
+        await state.update_data(
+            passenger_id=passenger_id,
+            passenger_name=passenger.full_name,
+            order_id=order_id
+        )
+        
+        await callback.message.answer(
+            f"✏️ **Напишите сообщение для {passenger.full_name}**\n\n"
+            f"Введите текст сообщения или отправьте /cancel для отмены",
+            parse_mode="Markdown"
+        )
+        
+        await state.set_state(DriverMessageStates.waiting_for_message)
+    
+    await callback.answer()
+    
+@router.message(Command("cancel"), DriverMessageStates.waiting_for_message)
+async def cancel_driver_message(message: Message, state: FSMContext):
+    """Отмена отправки сообщения"""
+    await state.clear()
+    await message.answer("❌ Отправка сообщения отменена.")
+
+@router.message(DriverMessageStates.waiting_for_message)
+async def send_message_to_passenger(message: Message, state: FSMContext):
+    """Отправляет сообщение пассажиру"""
+    
+    data = await state.get_data()
+    passenger_id = data.get('passenger_id')
+    passenger_name = data.get('passenger_name')
+    
+    if not passenger_id:
+        await message.answer("❌ Ошибка: данные пассажира потеряны")
+        await state.clear()
+        return
+    
+    # Получаем информацию о водителе
+    async with AsyncSessionLocal() as session:
+        driver_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        driver = driver_result.scalar_one_or_none()
+    
+    # Формируем сообщение для пассажира
+    passenger_text = (
+        f"📬 **Сообщение от водителя!**\n\n"
+        f"🚗 **Водитель:** {driver.full_name}\n"
+        f"⭐ Рейтинг: {driver.rating:.1f}\n\n"
+        f"📝 **Сообщение:**\n"
+        f"_{message.text}_"
+    )
+    
+    # Отправляем сообщение пассажиру
+    try:
+        await message.bot.send_message(
+            passenger_id,
+            passenger_text,
+            parse_mode="Markdown"
+        )
+        
+        await message.answer(
+            f"✅ **Сообщение отправлено {passenger_name}!**",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(
+            "❌ Не удалось отправить сообщение. Возможно, пассажир заблокировал бота."
+        )
+    
+    await state.clear()
+

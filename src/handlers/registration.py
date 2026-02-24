@@ -9,6 +9,7 @@ from src.database import AsyncSessionLocal
 from src.models import User, UserRole
 from src.keyboards.main import get_passenger_main_menu, get_driver_main_menu, get_cancel_keyboard, get_main_menu
 from src.utils.encryption import phone_encryptor
+
 router = Router()
 
 # Состояния для регистрации
@@ -18,12 +19,6 @@ class RegistrationStates(StatesGroup):
     waiting_for_role = State()
     waiting_for_car_model = State()
     waiting_for_car_plate = State()
-
-# Функция для проверки телефона
-def validate_phone(phone: str) -> bool:
-    # Простая проверка: удаляем все кроме цифр и смотрим длину
-    digits = re.sub(r'\D', '', phone)
-    return len(digits) >= 10 and len(digits) <= 12
 
 # Функция для проверки госномера (упрощенно)
 def validate_car_plate(plate: str) -> bool:
@@ -73,7 +68,6 @@ async def process_name(message: Message, state: FSMContext):
     
     name = message.text.strip()
     
-    # Более мягкая проверка имени
     if len(name) < 2:
         await message.answer(
             "❌ Имя должно содержать минимум 2 символа. Попробуйте снова:",
@@ -88,18 +82,10 @@ async def process_name(message: Message, state: FSMContext):
         )
         return
     
-    # Проверка, что имя не состоит только из пробелов
-    if not name.replace(' ', '').isalnum() and not all(x.isalpha() or x.isspace() for x in name):
-        await message.answer(
-            "❌ Имя может содержать только буквы и пробелы. Попробуйте снова:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
     # Сохраняем имя
     await state.update_data(full_name=name)
     
-    # Запрашиваем телефон с кнопкой отмены
+    # Запрашиваем телефон ТОЛЬКО через кнопку (без ручного ввода)
     phone_keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Отправить телефон", request_contact=True)],
@@ -110,48 +96,52 @@ async def process_name(message: Message, state: FSMContext):
     )
     
     await message.answer(
-        "📞 Теперь поделитесь вашим номером телефона.\n"
-        "Нажмите кнопку ниже или введите номер вручную:",
+        "📞 **Для регистрации необходимо поделиться номером телефона**\n\n"
+        "⚠️ Нажмите кнопку ниже — это единственный способ подтвердить ваш номер.\n"
+        "Telegram автоматически отправит ваш реальный номер, привязанный к аккаунту.",
+        parse_mode="Markdown",
         reply_markup=phone_keyboard
     )
     await state.set_state(RegistrationStates.waiting_for_phone)
 
-@router.message(RegistrationStates.waiting_for_phone)
-async def process_phone_text(message: Message, state: FSMContext):
-    """Обработка телефона из текстового сообщения"""
-    # Проверка на отмену
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("❌ Регистрация отменена.", reply_markup=get_main_menu())
-        return
+@router.message(RegistrationStates.waiting_for_phone, F.contact)
+async def process_phone_contact(message: Message, state: FSMContext):
+    """Обработка телефона через контакт (единственный способ)"""
     
-    phone = message.text.strip()  # ← ЭТОЙ СТРОКИ НЕ ХВАТАЛО!
-    
-    if not validate_phone(phone):
+    # Проверяем, что номер принадлежит этому пользователю
+    if message.contact.user_id != message.from_user.id:
         await message.answer(
-            "❌ Неверный формат телефона.\n"
-            "Введите номер в формате: +7XXXXXXXXXX или 8XXXXXXXXXX"
+            "❌ Вы можете отправить только свой номер телефона!\n"
+            "Пожалуйста, нажмите кнопку и отправьте свой контакт.",
+            reply_markup=get_cancel_keyboard()
         )
         return
     
+    phone = message.contact.phone_number
     await state.update_data(phone=phone)
     
     # Предлагаем выбрать роль
     role_keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Пассажир")],
-            [KeyboardButton(text="🚗 Водитель")]
+            [KeyboardButton(text="🚗 Водитель")],
+            [KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
     
     await message.answer(
-        "✅ Телефон получен!\n\n"
-        "Выберите вашу роль:",
+        "✅ **Телефон подтверждён!**\n\n"
+        f"📞 Номер: `{phone}`\n\n"
+        "Теперь выберите вашу роль:",
+        parse_mode="Markdown",
         reply_markup=role_keyboard
     )
     await state.set_state(RegistrationStates.waiting_for_role)
+
+# ВАЖНО: Удаляем обработчик process_phone_text полностью!
+# Теперь телефон можно получить ТОЛЬКО через кнопку
 
 @router.message(RegistrationStates.waiting_for_role)
 async def process_role(message: Message, state: FSMContext):
@@ -171,12 +161,20 @@ async def process_role(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_car_model)
+    elif message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Регистрация отменена.", reply_markup=get_main_menu())
     else:
         await message.answer("❓ Пожалуйста, выберите роль, используя кнопки ниже.")
 
 @router.message(RegistrationStates.waiting_for_car_model)
 async def process_car_model(message: Message, state: FSMContext):
     """Обработка марки авто"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Регистрация отменена.", reply_markup=get_main_menu())
+        return
+    
     car_model = message.text.strip()
     
     if len(car_model) < 2 or len(car_model) > 50:
@@ -194,6 +192,11 @@ async def process_car_model(message: Message, state: FSMContext):
 @router.message(RegistrationStates.waiting_for_car_plate)
 async def process_car_plate(message: Message, state: FSMContext):
     """Обработка госномера"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Регистрация отменена.", reply_markup=get_main_menu())
+        return
+    
     car_plate = message.text.strip().upper()
     
     if not validate_car_plate(car_plate):
@@ -206,8 +209,6 @@ async def process_car_plate(message: Message, state: FSMContext):
     
     await state.update_data(car_plate=car_plate)
     await save_user(message, state, UserRole.DRIVER)
-
-from src.utils.encryption import phone_encryptor
 
 async def save_user(message: Message, state: FSMContext, role: UserRole):
     """Сохранение пользователя в базу данных и показ меню"""
@@ -222,7 +223,7 @@ async def save_user(message: Message, state: FSMContext, role: UserRole):
             telegram_id=message.from_user.id,
             username=message.from_user.username,
             full_name=data['full_name'],
-            phone=encrypted_phone,  # ← ЗАШИФРОВАННЫЙ!
+            phone=encrypted_phone,
             role=role
         )
         
@@ -238,12 +239,12 @@ async def save_user(message: Message, state: FSMContext, role: UserRole):
     # Очищаем состояние
     await state.clear()
     
-    # Показываем меню (телефон уже зашифрован, но мы показываем оригинал из data)
+    # Показываем меню
     if role == UserRole.DRIVER:
         await message.answer(
             f"✅ **Регистрация завершена!**\n\n"
             f"🚗 **Водитель:** {data['full_name']}\n"
-            f"📞 Телефон: {data['phone']}\n"  # Оригинал из временных данных
+            f"📞 Телефон: {data['phone']}\n"
             f"🚘 Авто: {data.get('car_model')} ({data.get('car_plate')})\n\n"
             f"Выберите действие в меню:",
             parse_mode="Markdown",
@@ -253,9 +254,8 @@ async def save_user(message: Message, state: FSMContext, role: UserRole):
         await message.answer(
             f"✅ **Регистрация завершена!**\n\n"
             f"👤 **Пассажир:** {data['full_name']}\n"
-            f"📞 Телефон: {data['phone']}\n\n"  # Оригинал из временных данных
+            f"📞 Телефон: {data['phone']}\n\n"
             f"Выберите действие в меню:",
             parse_mode="Markdown",
             reply_markup=get_passenger_main_menu()
         )
-

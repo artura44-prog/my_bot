@@ -129,9 +129,17 @@ async def handle_register_button(message: Message, **kwargs):
             parse_mode="Markdown"
         )
     else:
-        # Запускаем процесс регистрации
+        # Запускаем процесс регистрации с новым состоянием
         from src.handlers.registration import cmd_register
-        await cmd_register(message, None)
+        from aiogram.fsm.context import FSMContext
+        # Создаём новое состояние или используем существующее
+        # В данном случае нужно передать state из kwargs или создать новый
+        if 'state' in kwargs:
+            await cmd_register(message, kwargs['state'])
+        else:
+            # Если state нет в kwargs, нужно его получить
+            # Временно можно так:
+            await message.answer("❌ Ошибка: попробуйте /register")
 
 @dp.message(Command("help"))
 @rate_limit("default")  # 10 раз в минуту
