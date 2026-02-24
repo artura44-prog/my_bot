@@ -14,6 +14,7 @@ from src.models import User, UserRole
 from src.keyboards.main import get_main_menu, get_passenger_main_menu, get_driver_main_menu
 from src.utils.rate_limiter import rate_limit, rate_limiter
 from src.config.limits import LIMITS
+from src.T_CompletingActiveTasks import start_scheduler
 
 load_dotenv()
 
@@ -148,9 +149,12 @@ async def cmd_help(message: Message):
 
 async def main():
     # Устанавливаем команды бота
-    await set_bot_commands()  # ← ДОБАВЬ ЭТУ СТРОКУ!
+    await set_bot_commands()  
     # Инициализация базы данных
     await init_db()
+    # Запускаем планировщик
+    await start_scheduler()
+    print("⏰ Планировщик автоматического завершения заказов запущен")
     print("🚀 Бот запускается...")
     print(f"🤖 Токен: {BOT_TOKEN[:10]}...")
     await dp.start_polling(bot)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Enum, ForeignKey, Text, CheckConstraint, BIGINT
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Enum, ForeignKey, Text, CheckConstraint, BIGINT, JSON  
 from sqlalchemy.orm import relationship, declarative_base
 import enum
 from datetime import datetime
@@ -60,6 +60,8 @@ class Order(Base):
     
     total_seats = Column(Integer, nullable=False)
     booked_seats = Column(Integer, default=0)
+
+    booked_passengers = Column(JSON, default=list) 
     
     # ИСПРАВЛЕНО: добавил ondelete="SET NULL" и nullable=True
     customer_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
@@ -111,3 +113,4 @@ class Rating(Base):
     
     def __repr__(self):
         return f"<Rating(id={self.id}, score={self.score})>"
+
