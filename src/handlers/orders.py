@@ -3,7 +3,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
+from sqlalchemy import select, Date  
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
@@ -50,6 +50,30 @@ async def cmd_create_order(message: Message, state: FSMContext, **kwargs):
         if user.role != UserRole.DRIVER:
             await message.answer("❌ Только водители могут размещать заказы!")
             return
+        
+        # Получаем все активные заказы водителя
+        active_orders_result = await session.execute(
+            select(Order).where(
+                Order.customer_id == user.id,
+                Order.status == OrderStatus.ACTIVE
+            )
+        )
+        active_orders = active_orders_result.scalars().all()
+        
+        # Проверка 1: не больше 2 активных заказов
+        if len(active_orders) >= 2:
+            await message.answer(
+                "❌ **Превышен лимит активных заказов!**\n\n"
+                f"У вас уже есть {len(active_orders)} активных заказа.\n"
+                "Максимум можно иметь **2 активных заказа**.\n\n"
+                "Завершите или отмените существующие заказы.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Проверка 2: не больше 1 заказа на одну дату
+        # Но мы пока не знаем дату, поэтому эту проверку добавим позже
+        # в функции save_order
     
     # Сохраняем роль пользователя в состояние
     await state.update_data(role=user.role)
@@ -415,12 +439,39 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         )
         user = user_result.scalar_one()
         
+        # ДЛЯ ВОДИТЕЛЯ: проверяем, нет ли уже заказа на эту дату
+        if role == UserRole.DRIVER:
+            # Получаем дату из данных (уже datetime объект)
+            order_date = data['date']
+            
+            # Ищем активные заказы на эту же дату
+            existing_order_result = await session.execute(
+                select(Order).where(
+                    Order.customer_id == user.id,
+                    Order.status == OrderStatus.ACTIVE,
+                    # Сравниваем по дате (без времени)
+                    Order.date.cast(Date) == order_date.cast(Date)
+                )
+            )
+            existing_order = existing_order_result.scalar_one_or_none()
+            
+            if existing_order:
+                await message.answer(
+                    f"❌ **У вас уже есть активный заказ на эту дату!**\n\n"
+                    f"📅 Дата: {order_date.strftime('%d.%m.%Y')}\n"
+                    f"📍 Маршрут: {existing_order.from_city} → {existing_order.to_city}\n\n"
+                    f"Вы можете создать только **один заказ в день**.",
+                    parse_mode="Markdown"
+                )
+                await state.clear()
+                return
+        
         # Создаем заказ
         order = Order(
             order_type=role,
             from_city=data['from_city'],
             to_city=data['to_city'],
-            date=data['date'],  # дата уже включает время
+            date=data['date'],
             price=data['price'],
             customer_id=user.id,
             status=OrderStatus.ACTIVE
@@ -429,7 +480,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         # Добавляем поля для водителя
         if role == UserRole.DRIVER:
             order.total_seats = data['total_seats']
-            order.booked_seats = 0  # Изначально свободно
+            order.booked_seats = 0
             # seats_back_row больше не используется
         
         session.add(order)
@@ -445,8 +496,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
             f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
             f"📅 Дата: {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
             f"💰 Цена за пассажира: {data['price']} руб.\n"
-            f"🪑 Всего мест: {data['total_seats']}\n"
-            f"🪑 Мест на заднем ряду: {data['back_seats']}\n\n"
+            f"🪑 Всего мест: {data['total_seats']}\n\n"
             f"🔍 Теперь пассажиры смогут найти ваше предложение!"
         )
         menu = get_driver_main_menu()
