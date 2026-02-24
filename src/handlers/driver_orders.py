@@ -30,19 +30,19 @@ async def my_orders(message: Message, **kwargs):
             await message.answer("❌ Эта функция доступна только водителям!")
             return
         
-        # Ищем активный заказ водителя
+        # Ищем ВСЕ активные заказы водителя
         today = datetime.now()
         
-        order_result = await session.execute(
+        orders_result = await session.execute(
             select(Order).where(
                 Order.customer_id == driver.id,
                 Order.status == OrderStatus.ACTIVE,
-                Order.date >= today  # Только будущие поездки
+                Order.date >= today
             ).order_by(Order.date)
         )
-        order = order_result.scalar_one_or_none()
+        orders = orders_result.scalars().all()  # ← ВСЕ ЗАКАЗЫ, А НЕ ОДИН!
         
-        if not order:
+        if not orders:
             await message.answer(
                 "📋 **Мои заказы**\n\n"
                 "У вас пока нет активных заказов.\n"
@@ -52,61 +52,62 @@ async def my_orders(message: Message, **kwargs):
             )
             return
         
-        # Получаем информацию о пассажирах, кто забронировал места
-        passengers_text = ""
-        if order.booked_passengers and len(order.booked_passengers) > 0:
-            for idx, passenger_id in enumerate(order.booked_passengers, 1):
-                passenger_result = await session.execute(
-                    select(User).where(User.id == passenger_id)
-                )
-                passenger = passenger_result.scalar_one_or_none()
-                
-                if passenger:
-                    # Расшифровываем телефон пассажира
-                    try:
-                        decrypted_phone = phone_encryptor.decrypt(passenger.phone)
-                    except:
-                        decrypted_phone = "Ошибка расшифровки"
+        # Отправляем информацию по КАЖДОМУ заказу
+        for order in orders:
+            # Получаем информацию о пассажирах
+            passengers_text = ""
+            if order.booked_passengers and len(order.booked_passengers) > 0:
+                for idx, passenger_id in enumerate(order.booked_passengers, 1):
+                    passenger_result = await session.execute(
+                        select(User).where(User.id == passenger_id)
+                    )
+                    passenger = passenger_result.scalar_one_or_none()
                     
-                    passengers_text += (
-                        f"{idx}. **{passenger.full_name}**\n"
-                        f"   📞 `{decrypted_phone}`\n"
-                        f"   ⭐ Рейтинг: {passenger.rating:.1f}\n\n"
-                    )
-        else:
-            passengers_text = "🚫 Пока нет забронированных мест"
-        
-        # Формируем текст заказа
-        text = (
-            f"🚗 **Ваш активный заказ**\n\n"
-            f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-            f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
-            f"💰 **Цена:** {order.price} руб./чел.\n"
-            f"🪑 **Места:** {order.booked_seats}/{order.total_seats} забронировано\n"
-            f"📊 **Свободно:** {order.available_seats}\n\n"
-            f"👥 **Пассажиры:**\n{passengers_text}"
-        )
-        
-        # Кнопки для управления заказом
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="❌ Отменить заказ", 
-                        callback_data=f"cancel_order:{order.id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📞 Связаться с пассажирами", 
-                        callback_data=f"contact_all_passengers:{order.id}"
-                    )
+                    if passenger:
+                        try:
+                            decrypted_phone = phone_encryptor.decrypt(passenger.phone)
+                        except:
+                            decrypted_phone = "Ошибка расшифровки"
+                        
+                        passengers_text += (
+                            f"{idx}. **{passenger.full_name}**\n"
+                            f"   📞 `{decrypted_phone}`\n"
+                            f"   ⭐ Рейтинг: {passenger.rating:.1f}\n\n"
+                        )
+            else:
+                passengers_text = "🚫 Пока нет забронированных мест"
+            
+            # Формируем текст заказа
+            text = (
+                f"🚗 **Ваш активный заказ**\n\n"
+                f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
+                f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"💰 **Цена:** {order.price} руб./чел.\n"
+                f"🪑 **Места:** {order.booked_seats}/{order.total_seats} забронировано\n"
+                f"📊 **Свободно:** {order.available_seats}\n\n"
+                f"👥 **Пассажиры:**\n{passengers_text}"
+            )
+            
+            # Кнопки для управления заказом
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отменить заказ", 
+                            callback_data=f"cancel_order:{order.id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="📞 Связаться с пассажирами", 
+                            callback_data=f"contact_all_passengers:{order.id}"
+                        )
+                    ]
                 ]
-            ]
-        )
-        
-        await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+            )
+            
+            await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @router.callback_query(lambda c: c.data.startswith("cancel_order:"))
 async def cancel_order(callback: CallbackQuery):
