@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: carpool_bot
       POSTGRES_USER: bot_user
-      POSTGRES_PASSWORD: password123
+      POSTGRES_PASSWORD: zGf7MvlGoIvlBP+1+8QN2Al34jl00xrpPiIvHlzNAbc=
     ports:
       - "5432:5432"
     volumes:

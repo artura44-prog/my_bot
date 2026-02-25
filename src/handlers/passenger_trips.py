@@ -120,7 +120,7 @@ async def my_trips(message: Message, **kwargs):
 async def cancel_booking(callback: CallbackQuery):
     """Отмена бронирования пассажиром"""
     order_id = int(callback.data.split(":")[1])
-    passenger_id = callback.from_user.id
+    passenger_telegram_id = callback.from_user.id
     
     async with AsyncSessionLocal() as session:
         # Получаем заказ
@@ -135,7 +135,7 @@ async def cancel_booking(callback: CallbackQuery):
         
         # Получаем пассажира
         passenger_result = await session.execute(
-            select(User).where(User.telegram_id == passenger_id)
+            select(User).where(User.telegram_id == passenger_telegram_id)
         )
         passenger = passenger_result.scalar_one_or_none()
         
@@ -143,42 +143,63 @@ async def cancel_booking(callback: CallbackQuery):
             await callback.answer("❌ Ошибка", show_alert=True)
             return
         
-        # Проверяем, что пассажир действительно забронировал
-        if not order.booked_passengers or passenger.id not in order.booked_passengers:
+        # Поиск пассажира в JSON и определение количества мест
+        seats_removed = 0
+        new_passengers = []
+        
+        if order.booked_passengers:
+            for p in order.booked_passengers:
+                if isinstance(p, dict) and p.get('id') == passenger.id:
+                    seats_removed = p.get('seats', 1)  # Сколько мест отменяем
+                    # НЕ добавляем этого пассажира
+                elif isinstance(p, int) and p == passenger.id:  # Старый формат
+                    seats_removed = 1
+                    # НЕ добавляем
+                else:
+                    new_passengers.append(p)  # Оставляем других пассажиров
+        
+        if seats_removed == 0:
             await callback.answer("❌ Вы не бронировали это место", show_alert=True)
             return
         
-        # Удаляем пассажира из списка
-        order.booked_passengers.remove(passenger.id)
-        order.booked_seats -= 1
+        # Получаем водителя ДО обновления
+        driver_result = await session.execute(
+            select(User).where(User.id == order.customer_id)
+        )
+        driver = driver_result.scalar_one_or_none()
+        
+        # Обновляем заказ
+        order.booked_passengers = new_passengers
+        order.booked_seats -= seats_removed
         
         await session.commit()
         
+        # Отправляем уведомление пассажиру
         await callback.message.edit_text(
             "✅ **Бронь успешно отменена!**\n\n"
+            f"📍 {order.from_city} → {order.to_city}\n"
+            f"📅 {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
             "Вы можете найти другую поездку через '🔍 Найти попутчика'",
             parse_mode="Markdown"
         )
         
-        # Уведомляем водителя об отмене
-        if order.customer_id:
-            driver_result = await session.execute(
-                select(User).where(User.id == order.customer_id)
-            )
-            driver = driver_result.scalar_one_or_none()
+        # Уведомляем водителя с ПРАВИЛЬНЫМ подсчётом мест
+        if driver:
+            available_seats = order.total_seats - order.booked_seats
             
-            if driver:
-                await callback.bot.send_message(
-                    driver.telegram_id,
-                    f"⚠️ **Пассажир отменил бронь!**\n\n"
-                    f"👤 Пассажир: {passenger.full_name}\n"
-                    f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-                    f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n"
-                    f"🪑 Свободных мест: {order.available_seats}"
-                )
+            await callback.bot.send_message(
+                driver.telegram_id,
+                f"⚠️ **Пассажир отменил бронь!**\n\n"
+                f"👤 **Пассажир:** {passenger.full_name}\n"
+                f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
+                f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🪑 **Свободных мест:** {available_seats}\n\n"
+                f"Проверьте в разделе '📋 Мои заказы'",
+                parse_mode="Markdown"
+            )
     
     await callback.answer()
-
+    
 @router.callback_query(lambda c: c.data.startswith("contact_driver_from_trip:"))
 async def contact_driver_from_trip(callback: CallbackQuery, state: FSMContext):
     """Связаться с водителем из текущей поездки"""
