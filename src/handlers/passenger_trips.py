@@ -1,12 +1,12 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext  # ← ДОБАВЬ ЭТУ СТРОКУ!
+from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
-from src.models import User, UserRole, Order, OrderStatus
+from src.models import User, UserRole, Order, OrderStatus, Rating
 
 router = Router()
 
@@ -104,7 +104,7 @@ async def my_trips(message: Message, **kwargs):
                 
                 await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         
-        # Показываем завершённые поездки (без кнопок)
+        # Показываем завершённые поездки с кнопками оценки
         if completed_trips:
             text = "✅ **История поездок**\n\n"
             for order, driver_name, driver_rating, _ in completed_trips[:5]:
@@ -115,6 +115,33 @@ async def my_trips(message: Message, **kwargs):
                     f"💰 **Цена:** {order.price} руб.\n\n"
                 )
             await message.answer(text, parse_mode="Markdown")
+            
+            # Добавляем кнопки оценки для каждой завершённой поездки
+            for order, driver_name, driver_rating, driver_id in completed_trips:
+                # Проверяем, не оценивали ли уже
+                rating_exists = await session.execute(
+                    select(Rating).where(
+                        Rating.order_id == order.id,
+                        Rating.rater_id == passenger.id
+                    )
+                )
+                if not rating_exists.scalar_one_or_none() and order.customer_id:
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text=f"⭐ Оценить водителя {driver_name}",
+                                callback_data=f"rate_user:{order.id}:{order.customer_id}"
+                            )]
+                        ]
+                    )
+                    await message.answer(
+                        f"📝 **Оставьте отзыв о поездке**\n\n"
+                        f"📍 {order.from_city} → {order.to_city}\n"
+                        f"📅 {order.date.strftime('%d.%m.%Y')}\n\n"
+                        f"Как вам поездка с {driver_name}?",
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
 
 @router.callback_query(lambda c: c.data.startswith("cancel_booking:"))
 async def cancel_booking(callback: CallbackQuery):

@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
-from src.models import User, UserRole, Order, OrderStatus
+from src.models import User, UserRole, Order, OrderStatus, Rating
 from src.keyboards.main import get_driver_main_menu
 from src.utils.encryption import phone_encryptor
 from aiogram.fsm.context import FSMContext
@@ -61,10 +61,18 @@ async def my_orders(message: Message, **kwargs):
         
         # Отправляем информацию по КАЖДОМУ заказу
         for order in orders:
-            # Получаем информацию о пассажирах
+            # Получаем информацию о пассажирах (поддержка объектного формата)
             passengers_text = ""
             if order.booked_passengers and len(order.booked_passengers) > 0:
-                for idx, passenger_id in enumerate(order.booked_passengers, 1):
+                for idx, passenger_data in enumerate(order.booked_passengers, 1):
+                    # Определяем формат данных
+                    if isinstance(passenger_data, dict):
+                        passenger_id = passenger_data.get('id')
+                        seats_count = passenger_data.get('seats', 1)
+                    else:
+                        passenger_id = passenger_data
+                        seats_count = 1
+                    
                     passenger_result = await session.execute(
                         select(User).where(User.id == passenger_id)
                     )
@@ -76,8 +84,10 @@ async def my_orders(message: Message, **kwargs):
                         except:
                             decrypted_phone = "Ошибка расшифровки"
                         
+                        seats_info = f" ({seats_count} мест)" if seats_count > 1 else ""
+                        
                         passengers_text += (
-                            f"{idx}. **{passenger.full_name}**\n"
+                            f"{idx}. **{passenger.full_name}**{seats_info}\n"
                             f"   📞 `{decrypted_phone}`\n"
                             f"   ⭐ Рейтинг: {passenger.rating:.1f}\n\n"
                         )
@@ -136,7 +146,13 @@ async def cancel_order(callback: CallbackQuery):
         
         # Уведомляем всех пассажиров об отмене
         if order.booked_passengers:
-            for passenger_id in order.booked_passengers:
+            for passenger_data in order.booked_passengers:
+                # Определяем формат данных
+                if isinstance(passenger_data, dict):
+                    passenger_id = passenger_data.get('id')
+                else:
+                    passenger_id = passenger_data
+                
                 passenger_result = await session.execute(
                     select(User).where(User.id == passenger_id)
                 )
@@ -177,7 +193,13 @@ async def contact_all_passengers(callback: CallbackQuery):
             return
         
         # Отправляем отдельное сообщение для каждого пассажира
-        for passenger_id in order.booked_passengers:
+        for passenger_data in order.booked_passengers:
+            # Определяем формат данных
+            if isinstance(passenger_data, dict):
+                passenger_id = passenger_data.get('id')
+            else:
+                passenger_id = passenger_data
+            
             passenger_result = await session.execute(
                 select(User).where(User.id == passenger_id)
             )
@@ -326,4 +348,3 @@ async def send_message_to_passenger(message: Message, state: FSMContext):
         )
     
     await state.clear()
-
