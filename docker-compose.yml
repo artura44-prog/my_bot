@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # База данных PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: carpool_db
+    environment:
+      POSTGRES_DB: carpool_bot
+      POSTGRES_USER: bot_user
+      POSTGRES_PASSWORD: password123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  # Redis для кэша/FSM
+  redis:
+    image: redis:7-alpine
+    container_name: carpool_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - app-network
+
+  # Приложение бота
+  bot:
+    build: .
+    container_name: carpool_bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"  # если нужен веб-интерфейс
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+      - ./config:/app/config
+    restart: unless-stopped
+    networks:
+      - app-network
+    command: python -m src.bot
+
+ 
+
+# Тома для хранения данных
+volumes:
+  postgres_data:
+  redis_data:
+
+# Сеть для связи контейнеров
+networks:
+  app-network:
+    driver: bridge
