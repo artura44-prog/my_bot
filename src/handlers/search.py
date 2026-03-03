@@ -1,6 +1,6 @@
 from aiogram import Router, F
 from aiogram.filters import Command 
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton  # ← ДОБАВЛЕНО!
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from datetime import datetime
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus
 from src.utils.encryption import phone_encryptor
+from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local
 
 router = Router()
 
@@ -36,14 +37,15 @@ async def search_passenger(message: Message, **kwargs):
             await message.answer("❌ Эта функция доступна только пассажирам!")
             return
         
-        # Ищем активные заказы водителей
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Используем UTC время для сравнения
+        now_utc = get_utc_now()
         
+        # Ищем активные заказы водителей (будущие поездки)
         orders_result = await session.execute(
             select(Order).where(
                 Order.order_type == UserRole.DRIVER,
                 Order.status == OrderStatus.ACTIVE,
-                Order.date >= today  # Только будущие поездки
+                Order.date >= now_utc  # Только будущие поездки (в UTC)
             ).order_by(Order.date)
         )
         orders = orders_result.scalars().all()
@@ -77,35 +79,36 @@ async def search_passenger(message: Message, **kwargs):
                 if driver:
                     driver_info = f"{driver.full_name}, ⭐ {driver.rating:.1f}"
             
-            # Формируем текст заказа
+            # Формируем текст заказа (конвертируем UTC в локальное время)
+            local_date = utc_to_local(order.date)
+            
             text = (
                 f"🚗 **Предложение водителя**\n\n"
                 f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                f"📅 **Дата:** {order.date.strftime('%d.%m.%Y')}\n"
-                f"⏰ **Время:** {order.date.strftime('%H:%M')}\n"
+                f"📅 **Дата:** {local_date.strftime('%d.%m.%Y')}\n"
+                f"⏰ **Время:** {local_date.strftime('%H:%M')}\n"
                 f"💰 **Цена:** {order.price} руб./чел.\n"
                 f"🪑 **Свободно мест:** {order.available_seats}/{order.total_seats}\n"
                 f"👤 **Водитель:** {driver_info}\n"
             )
             
             # Кнопки для заказа
-
             keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="✅ Забронировать место", 
-                callback_data=f"book_seat:{order.id}"
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Забронировать место", 
+                            callback_data=f"book_seat:{order.id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="📞 Связаться с водителем", 
+                            callback_data=f"contact_driver:{order.id}"
+                        )
+                    ]
+                ]
             )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📞 Связаться с водителем", 
-                callback_data=f"contact_driver:{order.id}"
-            )
-        ]
-    ]
-)
             
             await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
             count += 1
@@ -137,13 +140,16 @@ async def contact_driver(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Водитель не найден", show_alert=True)
             return
         
+        # Конвертируем UTC время в локальное для отображения
+        local_date = utc_to_local(order.date)
+        
         # Сохраняем данные в состояние
         await state.update_data(
             driver_id=driver.telegram_id,
             order_id=order_id,
             from_city=order.from_city,
             to_city=order.to_city,
-            date=order.date.strftime('%d.%m.%Y %H:%M')
+            date=local_date.strftime('%d.%m.%Y %H:%M')
         )
         
         # Запрашиваем сообщение
@@ -151,7 +157,7 @@ async def contact_driver(callback: CallbackQuery, state: FSMContext):
             f"📝 **Напишите сообщение водителю**\n\n"
             f"🚗 Водитель: {driver.full_name}\n"
             f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-            f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📅 Дата: {local_date.strftime('%d.%m.%Y %H:%M')}\n\n"
             f"Например: 'Сможете заехать за мной по адресу...'\n"
             f"Или отправьте /cancel для отмены",
             parse_mode="Markdown"
@@ -166,7 +172,7 @@ async def contact_driver(callback: CallbackQuery, state: FSMContext):
 async def book_seat(callback: CallbackQuery):
     """Бронирование места в заказе водителя"""
     order_id = int(callback.data.split(":")[1])
-    passenger_id = callback.from_user.id
+    passenger_telegram_id = callback.from_user.id
     
     async with AsyncSessionLocal() as session:
         # Получаем заказ
@@ -186,7 +192,7 @@ async def book_seat(callback: CallbackQuery):
         
         # Получаем пассажира
         passenger_result = await session.execute(
-            select(User).where(User.telegram_id == passenger_id)
+            select(User).where(User.telegram_id == passenger_telegram_id)
         )
         passenger = passenger_result.scalar_one_or_none()
         
@@ -194,18 +200,37 @@ async def book_seat(callback: CallbackQuery):
             await callback.answer("❌ Сначала зарегистрируйтесь", show_alert=True)
             return
         
-        # Проверяем, не забронировал ли уже
-        if order.booked_passengers and passenger.id in order.booked_passengers:
+        # Проверяем, не забронировал ли уже (поддержка объектного формата)
+        already_booked = False
+        if order.booked_passengers:
+            for p in order.booked_passengers:
+                if isinstance(p, dict) and p.get('id') == passenger.id:
+                    already_booked = True
+                    break
+                elif p == passenger.id:
+                    already_booked = True
+                    break
+        
+        if already_booked:
             await callback.answer("❌ Вы уже забронировали место", show_alert=True)
             return
         
-        # Бронируем место
+        # Бронируем место (используем объектный формат)
         if not order.booked_passengers:
             order.booked_passengers = []
-        order.booked_passengers.append(passenger.id)
+        
+        # Добавляем пассажира в объектном формате
+        order.booked_passengers.append({
+            'id': passenger.id,
+            'seats': 1,
+            'name': passenger.full_name
+        })
         order.booked_seats += 1
         
         await session.commit()
+        
+        # Конвертируем время для уведомления
+        local_date = utc_to_local(order.date)
         
         await callback.answer(
             "✅ Место успешно забронировано!",
@@ -225,7 +250,7 @@ async def book_seat(callback: CallbackQuery):
                     f"✅ **Новое бронирование!**\n\n"
                     f"👤 Пассажир: {passenger.full_name}\n"
                     f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-                    f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"📅 Дата: {local_date.strftime('%d.%m.%Y %H:%M')}\n"
                     f"🪑 Осталось мест: {order.available_seats}"
                 )
 
@@ -310,7 +335,6 @@ async def cancel_message(message: Message, state: FSMContext):
     """Отмена отправки сообщения"""
     await state.clear()
     await message.answer("❌ Отправка сообщения отменена.")
-
 
 @router.callback_query(lambda c: c.data.startswith("reply_to_passenger:"))
 async def start_reply_to_passenger(callback: CallbackQuery, state: FSMContext):

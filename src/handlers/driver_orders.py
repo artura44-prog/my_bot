@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
@@ -11,6 +11,7 @@ from src.utils.encryption import phone_encryptor
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
+from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local
 
 # Состояния для отправки сообщения пассажиру
 class DriverMessageStates(StatesGroup):
@@ -20,7 +21,7 @@ router = Router()
 
 @router.message(F.text == "📋 Мои заказы")
 async def my_orders(message: Message, **kwargs):
-    """Показать заказы водителя"""
+    """Показать заказы водителя (активные и завершённые с оценками)"""
     
     async with AsyncSessionLocal() as session:
         # Получаем водителя
@@ -37,94 +38,152 @@ async def my_orders(message: Message, **kwargs):
             await message.answer("❌ Эта функция доступна только водителям!")
             return
         
-        # Ищем ВСЕ активные заказы водителя
-        today = datetime.now()
+        # Используем UTC время для сравнения
+        now_utc = get_utc_now()
         
-        orders_result = await session.execute(
+        # === 1. Получаем АКТИВНЫЕ заказы ===
+        active_orders_result = await session.execute(
             select(Order).where(
                 Order.customer_id == driver.id,
                 Order.status == OrderStatus.ACTIVE,
-                Order.date >= today
+                Order.date >= now_utc
             ).order_by(Order.date)
         )
-        orders = orders_result.scalars().all()
+        active_orders = active_orders_result.scalars().all()
         
-        if not orders:
-            await message.answer(
-                "📋 **Мои заказы**\n\n"
-                "У вас пока нет активных заказов.\n"
-                "Создайте новый заказ через '📝 Разместить заказ'!",
-                parse_mode="Markdown",
-                reply_markup=get_driver_main_menu()
-            )
-            return
+        # === 2. Получаем ЗАВЕРШЁННЫЕ заказы (для оценки) ===
+        completed_orders_result = await session.execute(
+            select(Order).where(
+                Order.customer_id == driver.id,
+                Order.status == OrderStatus.COMPLETED,
+                Order.date < now_utc
+            ).order_by(Order.date.desc())
+        )
+        completed_orders = completed_orders_result.scalars().all()
         
-        # Отправляем информацию по КАЖДОМУ заказу
-        for order in orders:
-            # Получаем информацию о пассажирах (поддержка объектного формата)
-            passengers_text = ""
-            if order.booked_passengers and len(order.booked_passengers) > 0:
-                for idx, passenger_data in enumerate(order.booked_passengers, 1):
-                    # Определяем формат данных
-                    if isinstance(passenger_data, dict):
-                        passenger_id = passenger_data.get('id')
-                        seats_count = passenger_data.get('seats', 1)
-                    else:
-                        passenger_id = passenger_data
-                        seats_count = 1
-                    
-                    passenger_result = await session.execute(
-                        select(User).where(User.id == passenger_id)
-                    )
-                    passenger = passenger_result.scalar_one_or_none()
-                    
-                    if passenger:
-                        try:
-                            decrypted_phone = phone_encryptor.decrypt(passenger.phone)
-                        except:
-                            decrypted_phone = "Ошибка расшифровки"
+        # === Отображаем АКТИВНЫЕ заказы ===
+        if active_orders:
+            for order in active_orders:
+                # Получаем информацию о пассажирах
+                passengers_text = ""
+                if order.booked_passengers and len(order.booked_passengers) > 0:
+                    for idx, passenger_data in enumerate(order.booked_passengers, 1):
+                        # Определяем формат данных
+                        if isinstance(passenger_data, dict):
+                            passenger_id = passenger_data.get('id')
+                            seats_count = passenger_data.get('seats', 1)
+                        else:
+                            passenger_id = passenger_data
+                            seats_count = 1
                         
-                        seats_info = f" ({seats_count} мест)" if seats_count > 1 else ""
+                        passenger_result = await session.execute(
+                            select(User).where(User.id == passenger_id)
+                        )
+                        passenger = passenger_result.scalar_one_or_none()
                         
-                        passengers_text += (
-                            f"{idx}. **{passenger.full_name}**{seats_info}\n"
-                            f"   📞 `{decrypted_phone}`\n"
-                            f"   ⭐ Рейтинг: {passenger.rating:.1f}\n\n"
-                        )
-            else:
-                passengers_text = "🚫 Пока нет забронированных мест"
-            
-            # Формируем текст заказа
-            text = (
-                f"🚗 **Ваш активный заказ**\n\n"
-                f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
-                f"💰 **Цена:** {order.price} руб./чел.\n"
-                f"🪑 **Места:** {order.booked_seats}/{order.total_seats} забронировано\n"
-                f"📊 **Свободно:** {order.available_seats}\n\n"
-                f"👥 **Пассажиры:**\n{passengers_text}"
-            )
-            
-            # Кнопки для управления заказом
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="❌ Отменить заказ", 
-                            callback_data=f"cancel_order:{order.id}"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📞 Связаться с пассажирами", 
-                            callback_data=f"contact_all_passengers:{order.id}"
-                        )
+                        if passenger:
+                            try:
+                                decrypted_phone = phone_encryptor.decrypt(passenger.phone)
+                            except:
+                                decrypted_phone = "Ошибка расшифровки"
+                            
+                            seats_info = f" ({seats_count} мест)" if seats_count > 1 else ""
+                            
+                            passengers_text += (
+                                f"{idx}. **{passenger.full_name}**{seats_info}\n"
+                                f"   📞 `{decrypted_phone}`\n"
+                                f"   ⭐ Рейтинг: {passenger.rating:.1f}\n\n"
+                            )
+                else:
+                    passengers_text = "🚫 Пока нет забронированных мест"
+                
+                # Формируем текст активного заказа
+                text = (
+                    f"🚗 **Ваш активный заказ**\n\n"
+                    f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
+                    f"📅 **Дата:** {format_datetime(order.date, '%d.%m.%Y %H:%M')}\n"
+                    f"💰 **Цена:** {order.price} руб./чел.\n"
+                    f"🪑 **Места:** {order.booked_seats}/{order.total_seats} забронировано\n"
+                    f"📊 **Свободно:** {order.available_seats}\n\n"
+                    f"👥 **Пассажиры:**\n{passengers_text}"
+                )
+                
+                # Кнопки для управления активным заказом
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="❌ Отменить заказ", 
+                                callback_data=f"cancel_order:{order.id}"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="📞 Связаться с пассажирами", 
+                                callback_data=f"contact_all_passengers:{order.id}"
+                            )
+                        ]
                     ]
-                ]
+                )
+                
+                await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await message.answer(
+                "📋 **Активные заказы**\n\n"
+                "У вас пока нет активных заказов.",
+                parse_mode="Markdown"
             )
-            
-            await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        
+        # === Отображаем ЗАВЕРШЁННЫЕ заказы с кнопками оценки ===
+        if completed_orders:
+            for order in completed_orders:
+                if order.booked_passengers and len(order.booked_passengers) > 0:
+                    for passenger_data in order.booked_passengers:
+                        # Определяем формат данных пассажира
+                        if isinstance(passenger_data, dict):
+                            passenger_id = passenger_data.get('id')
+                            seats_count = passenger_data.get('seats', 1)
+                        else:
+                            passenger_id = passenger_data
+                            seats_count = 1
+                        
+                        # Получаем данные пассажира
+                        passenger_result = await session.execute(
+                            select(User).where(User.id == passenger_id)
+                        )
+                        passenger = passenger_result.scalar_one_or_none()
+                        
+                        if passenger:
+                            # Проверяем, не оценивал ли уже водитель этого пассажира
+                            rating_exists = await session.execute(
+                                select(Rating).where(
+                                    Rating.order_id == order.id,
+                                    Rating.rater_id == driver.id,
+                                    Rating.rated_user_id == passenger.id
+                                )
+                            )
+                            
+                            if not rating_exists.scalar_one_or_none():
+                                # Кнопка для оценки пассажира
+                                rating_keyboard = InlineKeyboardMarkup(
+                                    inline_keyboard=[
+                                        [InlineKeyboardButton(
+                                            text=f"⭐ Оценить пассажира {passenger.full_name}",
+                                            callback_data=f"rate_passenger:{order.id}:{passenger.id}"
+                                        )]
+                                    ]
+                                )
+                                
+                                rating_text = (
+                                    f"📝 **Оцените пассажира**\n\n"
+                                    f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
+                                    f"📅 Дата: {format_datetime(order.date, '%d.%m.%Y %H:%M')}\n"
+                                    f"👤 Пассажир: {passenger.full_name}\n"
+                                    f"🪑 Забронировано мест: {seats_count}\n\n"
+                                    f"Как прошла поездка? Оцените пассажира!"
+                                )
+                                
+                                await message.answer(rating_text, parse_mode="Markdown", reply_markup=rating_keyboard)
 
 @router.callback_query(lambda c: c.data.startswith("cancel_order:"))
 async def cancel_order(callback: CallbackQuery):
@@ -163,7 +222,7 @@ async def cancel_order(callback: CallbackQuery):
                         passenger.telegram_id,
                         f"⚠️ **Водитель отменил поездку!**\n\n"
                         f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-                        f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"📅 Дата: {format_datetime(order.date, '%d.%m.%Y %H:%M')}\n\n"
                         f"Вы можете найти другую поездку через '🔍 Найти попутчика'"
                     )
         
@@ -213,8 +272,6 @@ async def contact_all_passengers(callback: CallbackQuery):
                     decrypted_phone = "Ошибка расшифровки"
                 
                 # Формируем ссылку на Telegram
-                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                
                 if passenger.username:
                     # Если есть username - прямая ссылка
                     tg_link = f"https://t.me/{passenger.username}"
@@ -252,7 +309,6 @@ async def contact_all_passengers(callback: CallbackQuery):
                 
                 await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         
-        # Убираем кнопку "Назад к заказу" - просто отправляем уведомление
         await callback.message.answer(
             "✅ **Контакты пассажиров отправлены**\n\n"
             "Выберите пассажира для связи:"

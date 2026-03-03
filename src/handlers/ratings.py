@@ -8,6 +8,7 @@ from datetime import datetime
 
 from src.database import AsyncSessionLocal
 from src.models import User, Order, OrderStatus, Rating
+from src.utils.time_utils import format_datetime, utc_to_local
 
 router = Router()
 
@@ -17,7 +18,7 @@ class RatingStates(StatesGroup):
 
 @router.callback_query(lambda c: c.data.startswith("rate_user:"))
 async def start_rating(callback: CallbackQuery, state: FSMContext):
-    """Начало процесса оценки"""
+    """Начало процесса оценки (пассажир оценивает водителя)"""
     try:
         _, order_id, rated_user_id = callback.data.split(":")
         order_id = int(order_id)
@@ -41,11 +42,12 @@ async def start_rating(callback: CallbackQuery, state: FSMContext):
         existing_rating = await session.execute(
             select(Rating).where(
                 Rating.order_id == order_id,
-                Rating.rater_id == rater.id
+                Rating.rater_id == rater.id,
+                Rating.rated_user_id == rated_user_id
             )
         )
         if existing_rating.scalar_one_or_none():
-            await callback.answer("❌ Вы уже оценили эту поездку", show_alert=True)
+            await callback.answer("❌ Вы уже оценили этого пользователя", show_alert=True)
             return
         
         # Получаем информацию о пользователе, которого оценивают
@@ -68,7 +70,10 @@ async def start_rating(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Заказ не найден", show_alert=True)
             return
         
-        # Сохраняем данные в состояние
+        # Конвертируем UTC время в локальное для отображения
+        local_date = utc_to_local(order.date)
+        
+        # Сохраняем данные в состояние (дату сохраняем как строку в локальном времени)
         await state.update_data(
             order_id=order_id,
             rater_id=rater.id,
@@ -76,7 +81,108 @@ async def start_rating(callback: CallbackQuery, state: FSMContext):
             rated_user_name=rated.full_name,
             from_city=order.from_city,
             to_city=order.to_city,
-            date=order.date.strftime('%d.%m.%Y %H:%M')
+            date=local_date.strftime('%d.%m.%Y %H:%M')
+        )
+        
+        # Показываем клавиатуру с оценками
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⭐" * i, callback_data=f"set_rating:{i}") 
+                 for i in range(1, 6)]
+            ]
+        )
+        
+        # Определяем роль оцениваемого пользователя для текста
+        role_text = "водителя" if rated.role.value == "driver" else "пассажира"
+        
+        await callback.message.edit_text(
+            f"⭐ **Оцените {role_text}**\n\n"
+            f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
+            f"📅 Дата: {local_date.strftime('%d.%m.%Y %H:%M')}\n"
+            f"👤 Пользователь: {rated.full_name}\n\n"
+            f"Как вы оцените {role_text}? (1-5 звёзд):",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("rate_passenger:"))
+async def rate_passenger(callback: CallbackQuery, state: FSMContext):
+    """Начало оценки пассажира водителем"""
+    try:
+        _, order_id, passenger_id = callback.data.split(":")
+        order_id = int(order_id)
+        passenger_id = int(passenger_id)
+    except ValueError:
+        await callback.answer("❌ Неверный формат данных", show_alert=True)
+        return
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем водителя (кто оценивает)
+        driver_result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        driver = driver_result.scalar_one_or_none()
+        
+        if not driver:
+            await callback.answer("❌ Сначала зарегистрируйтесь!", show_alert=True)
+            return
+        
+        # Проверяем, что водитель действительно водитель
+        if driver.role.value != "driver":
+            await callback.answer("❌ Эта функция доступна только водителям", show_alert=True)
+            return
+        
+        # Получаем заказ
+        order_result = await session.execute(
+            select(Order).where(Order.id == order_id)
+        )
+        order = order_result.scalar_one_or_none()
+        
+        if not order:
+            await callback.answer("❌ Заказ не найден", show_alert=True)
+            return
+        
+        # Проверяем, что это заказ водителя
+        if order.customer_id != driver.id:
+            await callback.answer("❌ Это не ваш заказ", show_alert=True)
+            return
+        
+        # Получаем пассажира
+        passenger_result = await session.execute(
+            select(User).where(User.id == passenger_id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Пассажир не найден", show_alert=True)
+            return
+        
+        # Проверяем, не оценивали ли уже
+        existing_rating = await session.execute(
+            select(Rating).where(
+                Rating.order_id == order_id,
+                Rating.rater_id == driver.id,
+                Rating.rated_user_id == passenger_id
+            )
+        )
+        if existing_rating.scalar_one_or_none():
+            await callback.answer("❌ Вы уже оценили этого пассажира", show_alert=True)
+            return
+        
+        # Конвертируем UTC время в локальное для отображения
+        local_date = utc_to_local(order.date)
+        
+        # Сохраняем данные в состояние
+        await state.update_data(
+            order_id=order_id,
+            rater_id=driver.id,
+            rated_user_id=passenger_id,
+            rated_user_name=passenger.full_name,
+            from_city=order.from_city,
+            to_city=order.to_city,
+            date=local_date.strftime('%d.%m.%Y %H:%M')
         )
         
         # Показываем клавиатуру с оценками
@@ -88,11 +194,11 @@ async def start_rating(callback: CallbackQuery, state: FSMContext):
         )
         
         await callback.message.edit_text(
-            f"⭐ **Оцените поездку**\n\n"
+            f"⭐ **Оцените пассажира**\n\n"
             f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-            f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n"
-            f"👤 Пользователь: {rated.full_name}\n\n"
-            f"Как вы оцените поездку? (1-5 звёзд):",
+            f"📅 Дата: {local_date.strftime('%d.%m.%Y %H:%M')}\n"
+            f"👤 Пассажир: {passenger.full_name}\n\n"
+            f"Как вы оцените пассажира? (1-5 звёзд):",
             parse_mode="Markdown",
             reply_markup=keyboard
         )
@@ -181,11 +287,12 @@ async def save_rating(event, state: FSMContext, comment: str = None):
         existing_rating = await session.execute(
             select(Rating).where(
                 Rating.order_id == data['order_id'],
-                Rating.rater_id == data['rater_id']
+                Rating.rater_id == data['rater_id'],
+                Rating.rated_user_id == data['rated_user_id']
             )
         )
         if existing_rating.scalar_one_or_none():
-            text = "❌ Вы уже оценили эту поездку"
+            text = "❌ Вы уже оценили этого пользователя"
             if hasattr(event, 'message'):
                 await event.message.answer(text)
             else:
@@ -200,7 +307,7 @@ async def save_rating(event, state: FSMContext, comment: str = None):
             rated_user_id=data['rated_user_id'],
             score=data['score'],
             comment=comment,
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow()  # created_at храним в UTC
         )
         session.add(new_rating)
         
@@ -228,11 +335,11 @@ async def save_rating(event, state: FSMContext, comment: str = None):
         
         await session.commit()
         
-        # Отправляем подтверждение
+        # Отправляем подтверждение (дата уже сохранена в состоянии в локальном времени)
         text = (
             f"✅ **Спасибо за оценку!**\n\n"
             f"📍 Маршрут: {data.get('from_city')} → {data.get('to_city')}\n"
-            f"📅 Дата: {data.get('date')}\n"
+            f"📅 Дата: {data.get('date')}\n"  # Дата уже в локальном времени
             f"👤 Пользователь: {data.get('rated_user_name')}\n"
             f"⭐ Оценка: {data['score']} звёзд\n"
         )

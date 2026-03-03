@@ -1,12 +1,13 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, cast
+from sqlalchemy import select, cast, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus, Rating
+from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local
 
 router = Router()
 
@@ -30,12 +31,22 @@ async def my_trips(message: Message, **kwargs):
             return
         
         # Ищем заказы, где пассажир забронировал места
+        
         orders_result = await session.execute(
             select(Order).where(
-                cast(Order.booked_passengers, JSONB).contains([passenger.id])
+                or_(
+                    # Поиск в объектном формате [{"id": 2}]
+                    cast(Order.booked_passengers, JSONB).contains([{"id": passenger.id}]),
+                    # Поиск в старом формате [2]
+                    cast(Order.booked_passengers, JSONB).contains([passenger.id])
+                )
             ).order_by(Order.date.desc())
         )
         orders = orders_result.scalars().all()
+        print(f"🔍 Поиск заказов для пассажира ID={passenger.id}")
+        print(f"📊 Найдено заказов: {len(orders)}")
+        for o in orders:
+            print(f"  Заказ #{o.id}: статус={o.status}")
         
         if not orders:
             await message.answer(
@@ -45,8 +56,6 @@ async def my_trips(message: Message, **kwargs):
                 parse_mode="Markdown"
             )
             return
-        
-        today = datetime.now()
         
         # Разделяем на активные и завершённые
         active_trips = []
@@ -67,8 +76,9 @@ async def my_trips(message: Message, **kwargs):
                     driver_rating = driver.rating
                     driver_id = driver.telegram_id
             
-            # Определяем статус поездки
-            if order.date >= today and order.status == OrderStatus.ACTIVE:
+            # ПРОСТАЯ ЛОГИКА: всё решает статус из БД
+            # Планировщик сам завершит заказы с просроченной датой
+            if order.status == OrderStatus.ACTIVE:
                 active_trips.append((order, driver_name, driver_rating, driver_id))
             else:
                 completed_trips.append((order, driver_name, driver_rating, driver_id))
@@ -76,10 +86,13 @@ async def my_trips(message: Message, **kwargs):
         # Показываем активные поездки с кнопками
         if active_trips:
             for order, driver_name, driver_rating, driver_id in active_trips:
+                # Конвертируем UTC в локальное время для отображения
+                local_date = utc_to_local(order.date)
+                
                 text = (
                     f"🚗 **Текущая поездка**\n\n"
                     f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                    f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
                     f"🚗 **Водитель:** {driver_name} ⭐ {driver_rating:.1f}\n"
                     f"💰 **Цена:** {order.price} руб.\n\n"
                 )
@@ -103,14 +116,17 @@ async def my_trips(message: Message, **kwargs):
                 )
                 
                 await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await message.answer("📋 **Нет активных поездок**", parse_mode="Markdown")
         
         # Показываем завершённые поездки с кнопками оценки
         if completed_trips:
             text = "✅ **История поездок**\n\n"
             for order, driver_name, driver_rating, _ in completed_trips[:5]:
+                local_date = utc_to_local(order.date)
                 text += (
                     f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                    f"📅 **Дата:** {order.date.strftime('%d.%m.%Y')}\n"
+                    f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
                     f"🚗 **Водитель:** {driver_name} ⭐ {driver_rating:.1f}\n"
                     f"💰 **Цена:** {order.price} руб.\n\n"
                 )
@@ -126,6 +142,7 @@ async def my_trips(message: Message, **kwargs):
                     )
                 )
                 if not rating_exists.scalar_one_or_none() and order.customer_id:
+                    local_date = utc_to_local(order.date)
                     keyboard = InlineKeyboardMarkup(
                         inline_keyboard=[
                             [InlineKeyboardButton(
@@ -137,7 +154,7 @@ async def my_trips(message: Message, **kwargs):
                     await message.answer(
                         f"📝 **Оставьте отзыв о поездке**\n\n"
                         f"📍 {order.from_city} → {order.to_city}\n"
-                        f"📅 {order.date.strftime('%d.%m.%Y')}\n\n"
+                        f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n\n"
                         f"Как вам поездка с {driver_name}?",
                         parse_mode="Markdown",
                         reply_markup=keyboard
@@ -201,16 +218,16 @@ async def cancel_booking(callback: CallbackQuery):
         
         await session.commit()
         
-        # Отправляем уведомление пассажиру
+        # Отправляем уведомление пассажиру с правильным временем
         await callback.message.edit_text(
             "✅ **Бронь успешно отменена!**\n\n"
             f"📍 {order.from_city} → {order.to_city}\n"
-            f"📅 {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📅 {format_datetime(order.date, '%d.%m.%Y %H:%M')}\n\n"
             "Вы можете найти другую поездку через '🔍 Найти попутчика'",
             parse_mode="Markdown"
         )
         
-        # Уведомляем водителя с ПРАВИЛЬНЫМ подсчётом мест
+        # Уведомляем водителя с ПРАВИЛЬНЫМ подсчётом мест и временем
         if driver:
             available_seats = order.total_seats - order.booked_seats
             
@@ -219,7 +236,7 @@ async def cancel_booking(callback: CallbackQuery):
                 f"⚠️ **Пассажир отменил бронь!**\n\n"
                 f"👤 **Пассажир:** {passenger.full_name}\n"
                 f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                f"📅 **Дата:** {order.date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"📅 **Дата:** {format_datetime(order.date, '%d.%m.%Y %H:%M')}\n"
                 f"🪑 **Свободных мест:** {available_seats}\n\n"
                 f"Проверьте в разделе '📋 Мои заказы'",
                 parse_mode="Markdown"
@@ -253,20 +270,23 @@ async def contact_driver_from_trip(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Водитель не найден", show_alert=True)
             return
         
+        # Конвертируем UTC время в локальное для отображения
+        local_date = utc_to_local(order.date)
+        
         # Сохраняем данные в состояние
         await state.update_data(
             driver_id=driver.telegram_id,
             order_id=order_id,
             from_city=order.from_city,
             to_city=order.to_city,
-            date=order.date.strftime('%d.%m.%Y %H:%M')
+            date=local_date.strftime('%d.%m.%Y %H:%M')
         )
         
         await callback.message.answer(
             f"📝 **Напишите сообщение водителю**\n\n"
             f"🚗 Водитель: {driver.full_name}\n"
             f"📍 Маршрут: {order.from_city} → {order.to_city}\n"
-            f"📅 Дата: {order.date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📅 Дата: {local_date.strftime('%d.%m.%Y %H:%M')}\n\n"
             f"Или отправьте /cancel для отмены",
             parse_mode="Markdown"
         )

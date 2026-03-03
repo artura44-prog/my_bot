@@ -7,6 +7,7 @@ from src.database import AsyncSessionLocal
 from src.models import User, UserRole
 from src.keyboards.main import get_passenger_main_menu, get_driver_main_menu, get_profile_inline_keyboard, get_delete_confirmation_keyboard
 from src.utils.encryption import phone_encryptor
+from src.utils.time_utils import format_datetime  # Добавлен импорт
 
 router = Router()
 

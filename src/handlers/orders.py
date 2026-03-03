@@ -9,6 +9,7 @@ from datetime import datetime
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus
 from src.keyboards.main import get_cancel_keyboard, get_passenger_main_menu, get_driver_main_menu
+from src.utils.time_utils import parse_datetime, get_utc_now, format_datetime, utc_to_local, local_to_utc
 
 router = Router()
 
@@ -185,9 +186,9 @@ async def process_date(message: Message, state: FSMContext):
         # Пробуем распарсить дату
         date = datetime.strptime(date_str, "%d.%m.%Y")
         
-        # Проверяем, что дата не в прошлом
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        if date < today:
+        # Проверяем, что дата не в прошлом (используем UTC для сравнения)
+        today_utc = get_utc_now().date()
+        if date.date() < today_utc:
             await message.answer(
                 "❌ Дата не может быть в прошлом!\n"
                 "Введите будущую дату:",
@@ -248,22 +249,24 @@ async def process_time(message: Message, state: FSMContext):
         )
         return
     
-    # Объединяем дату и время
+    # Получаем дату из состояния
     data = await state.get_data()
     date = data.get('date')
     
-    # Создаем datetime объект с датой и временем
-    combined_datetime = datetime(
+    # Создаем локальный datetime
+    local_dt = datetime(
         year=date.year,
         month=date.month,
         day=date.day,
         hour=hours,
         minute=minutes
     )
-    await state.update_data(date=combined_datetime)
+    
+    # Конвертируем в UTC для сохранения в БД
+    utc_dt = local_to_utc(local_dt)
+    await state.update_data(utc_datetime=utc_dt)
     
     # Получаем роль из состояния
-    data = await state.get_data()
     role = data.get('role')
     
     if role == UserRole.DRIVER:
@@ -422,7 +425,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
     data = await state.get_data()
     
     # Проверяем обязательные поля
-    required_fields = ['from_city', 'to_city', 'date', 'price']
+    required_fields = ['from_city', 'to_city', 'utc_datetime', 'price']
     if role == UserRole.DRIVER:
         required_fields.append('total_seats')
     
@@ -439,26 +442,26 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         )
         user = user_result.scalar_one()
         
-       
         # ДЛЯ ВОДИТЕЛЯ: проверяем, нет ли уже заказа на эту дату
         if role == UserRole.DRIVER:
-            order_date = data['date']
-            
-            # Получаем дату без времени для сравнения
+            utc_datetime = data['utc_datetime']
             
             existing_order_result = await session.execute(
                 select(Order).where(
                     Order.customer_id == user.id,
                     Order.status == OrderStatus.ACTIVE,
-                    func.date(Order.date) == order_date.date()  # ← ПРАВИЛЬНО!
+                    func.date(Order.date) == utc_datetime.date()
                 )
             )
             existing_order = existing_order_result.scalar_one_or_none()
             
             if existing_order:
+                # Конвертируем UTC время в локальное для отображения
+                local_date = utc_to_local(utc_datetime)
+                
                 await message.answer(
                     f"❌ **У вас уже есть активный заказ на эту дату!**\n\n"
-                    f"📅 Дата: {order_date.strftime('%d.%m.%Y')}\n"
+                    f"📅 Дата: {local_date.strftime('%d.%m.%Y')}\n"
                     f"📍 Маршрут: {existing_order.from_city} → {existing_order.to_city}\n\n"
                     f"Вы можете создать только **один заказ в день**.",
                     parse_mode="Markdown"
@@ -466,12 +469,12 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
                 await state.clear()
                 return
         
-        # Создаем заказ
+        # Создаем заказ с UTC временем
         order = Order(
             order_type=role,
             from_city=data['from_city'],
             to_city=data['to_city'],
-            date=data['date'],
+            date=data['utc_datetime'],  # Сохраняем UTC время
             price=data['price'],
             customer_id=user.id,
             status=OrderStatus.ACTIVE
@@ -485,16 +488,19 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         
         session.add(order)
         await session.commit()
+        
+        # Получаем локальное время для отображения
+        local_datetime = utc_to_local(data['utc_datetime'])
     
     # Очищаем состояние
     await state.clear()
     
-    # Формируем текст подтверждения
+    # Формируем текст подтверждения с локальным временем
     if role == UserRole.DRIVER:
         confirmation_text = (
             f"✅ **Заказ водителя успешно создан!**\n\n"
             f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
-            f"📅 Дата: {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"💰 Цена за пассажира: {data['price']} руб.\n"
             f"🪑 Всего мест: {data['total_seats']}\n\n"
             f"🔍 Теперь пассажиры смогут найти ваше предложение!"
@@ -504,7 +510,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         confirmation_text = (
             f"✅ **Заказ пассажира успешно создан!**\n\n"
             f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
-            f"📅 Дата: {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"💰 Общая стоимость: {data['price']} руб.\n\n"
             f"🔍 Теперь водители смогут найти ваш заказ!"
         )
