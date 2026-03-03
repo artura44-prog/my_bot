@@ -205,7 +205,7 @@ async def process_date(message: Message, state: FSMContext):
                 existing_active_order_result = await session.execute(
                     select(Order).where(
                         Order.customer_id == user.id,
-                        Order.status == OrderStatus.ACTIVE,  # Только ACTIVE!
+                        Order.status == OrderStatus.ACTIVE,
                         func.date(Order.date) == date.date()
                     )
                 )
@@ -229,26 +229,32 @@ async def process_date(message: Message, state: FSMContext):
                     )
                     return
                 
-                # Проверяем, есть ли ОТМЕНЁННЫЙ заказ на эту дату (просто для информации)
-                existing_cancelled_order_result = await session.execute(
+                # Проверяем, есть ли ОТМЕНЁННЫЕ заказы на эту дату (просто для информации)
+                existing_cancelled_orders_result = await session.execute(
                     select(Order).where(
                         Order.customer_id == user.id,
                         Order.status == OrderStatus.CANCELLED,
                         func.date(Order.date) == date.date()
                     )
                 )
-                existing_cancelled_order = existing_cancelled_order_result.scalar_one_or_none()
+                existing_cancelled_orders = existing_cancelled_orders_result.scalars().all()
                 
-                if existing_cancelled_order:
+                if existing_cancelled_orders:
+                    # Берём первый отменённый заказ для примера
+                    first_cancelled = existing_cancelled_orders[0]
+                    
                     # Информируем, но НЕ БЛОКИРУЕМ создание нового заказа
                     data = await state.get_data()
                     new_from = data.get('from_city', '?')
                     new_to = data.get('to_city', '?')
                     
+                    cancelled_count = len(existing_cancelled_orders)
+                    count_text = f" (всего {cancelled_count})" if cancelled_count > 1 else ""
+                    
                     await message.answer(
-                        f"ℹ️ **На эту дату был отменённый заказ**\n\n"
+                        f"ℹ️ **На эту дату был отменённый заказ**{count_text}\n\n"
                         f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
-                        f"📍 Отменённый маршрут: {existing_cancelled_order.from_city} → {existing_cancelled_order.to_city}\n"
+                        f"📍 Отменённый маршрут: {first_cancelled.from_city} → {first_cancelled.to_city}\n"
                         f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
                         f"Вы можете создать новый заказ, так как старый был отменён.",
                         parse_mode="Markdown"
