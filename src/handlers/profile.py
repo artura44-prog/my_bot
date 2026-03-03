@@ -1,13 +1,14 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from sqlalchemy import select
+from sqlalchemy import select, or_, cast
+from sqlalchemy.dialects.postgresql import JSONB
 
 from src.database import AsyncSessionLocal
-from src.models import User, UserRole
+from src.models import User, UserRole, Order, OrderStatus, Rating
 from src.keyboards.main import get_passenger_main_menu, get_driver_main_menu, get_profile_inline_keyboard, get_delete_confirmation_keyboard
 from src.utils.encryption import phone_encryptor
-from src.utils.time_utils import format_datetime  # Добавлен импорт
+from src.utils.time_utils import format_datetime, utc_to_local
 
 router = Router()
 
@@ -41,7 +42,7 @@ async def show_profile(message: Message):
 {role_text}
 **ID:** {user.telegram_id}
 **Имя:** {user.full_name}
-**Телефон:** {decrypted_phone}  # ← РАСШИФРОВАННЫЙ!
+**Телефон:** {decrypted_phone}
 **Рейтинг:** {rating_text}
 **Оценок:** {user.total_ratings}
         """
@@ -49,11 +50,153 @@ async def show_profile(message: Message):
         if user.role == UserRole.DRIVER and user.car_model:
             profile_text += f"\n**Авто:** {user.car_model} ({user.car_plate})"
         
-        await message.answer(
-            profile_text,
-            parse_mode="Markdown",
-            reply_markup=get_profile_inline_keyboard(user.id, user.role)
+        # Для пассажиров добавляем кнопку "История поездок"
+        if user.role == UserRole.PASSENGER:
+            history_button = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📜 История поездок", callback_data="passenger_history")]
+                ]
+            )
+            await message.answer(
+                profile_text,
+                parse_mode="Markdown",
+                reply_markup=history_button
+            )
+        else:
+            # Для водителей обычная клавиатура профиля
+            await message.answer(
+                profile_text,
+                parse_mode="Markdown",
+                reply_markup=get_profile_inline_keyboard(user.id, user.role)
+            )
+
+@router.callback_query(lambda c: c.data == "passenger_history")
+async def passenger_history(callback: CallbackQuery):
+    """Показать историю поездок пассажира (завершённые + отменённые)"""
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем пассажира
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
         )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
+        # Ищем НЕАКТИВНЫЕ заказы (завершённые и отменённые)
+        orders_result = await session.execute(
+            select(Order).where(
+                or_(
+                    cast(Order.booked_passengers, JSONB).contains([{"id": passenger.id}]),
+                    cast(Order.booked_passengers, JSONB).contains([passenger.id])
+                ),
+                Order.status.in_([OrderStatus.COMPLETED, OrderStatus.CANCELLED])
+            ).order_by(Order.date.desc())
+        )
+        orders = orders_result.scalars().all()
+        
+        if not orders:
+            await callback.message.answer(
+                "📜 **История поездок**\n\n"
+                "У вас пока нет завершённых или отменённых поездок.",
+                parse_mode="Markdown"
+            )
+            await callback.answer()
+            return
+        
+        # Группируем по статусам
+        completed_text = "✅ **Завершённые поездки**\n\n"
+        cancelled_text = "❌ **Отменённые поездки**\n\n"
+        
+        completed_count = 0
+        cancelled_count = 0
+        
+        for order in orders:
+            # Получаем информацию о водителе
+            driver_name = "Неизвестен"
+            driver_rating = 0
+            if order.customer_id:
+                driver_result = await session.execute(
+                    select(User).where(User.id == order.customer_id)
+                )
+                driver = driver_result.scalar_one_or_none()
+                if driver:
+                    driver_name = driver.full_name
+                    driver_rating = driver.rating
+            
+            local_date = utc_to_local(order.date)
+            
+            # Находим, сколько мест забронировал этот пассажир
+            seats_count = 1
+            if order.booked_passengers:
+                for p in order.booked_passengers:
+                    if isinstance(p, dict) and p.get('id') == passenger.id:
+                        seats_count = p.get('seats', 1)
+                        break
+                    elif p == passenger.id:
+                        seats_count = 1
+                        break
+            
+            trip_info = (
+                f"📍 {order.from_city} → {order.to_city}\n"
+                f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚗 Водитель: {driver_name} ⭐ {driver_rating:.1f}\n"
+                f"💰 {order.price} руб. × {seats_count} мест = {order.price * seats_count} руб.\n\n"
+            )
+            
+            if order.status == OrderStatus.COMPLETED:
+                completed_text += trip_info
+                completed_count += 1
+            else:  # CANCELLED
+                cancelled_text += trip_info
+                cancelled_count += 1
+        
+        # Отправляем результаты
+        if completed_count > 0:
+            await callback.message.answer(completed_text, parse_mode="Markdown")
+        
+        if cancelled_count > 0:
+            await callback.message.answer(cancelled_text, parse_mode="Markdown")
+        
+        # Добавляем кнопки оценки для завершённых поездок (если не оценили)
+        for order in orders:
+            if order.status == OrderStatus.COMPLETED and order.customer_id:
+                # Проверяем, не оценивали ли уже
+                rating_exists = await session.execute(
+                    select(Rating).where(
+                        Rating.order_id == order.id,
+                        Rating.rater_id == passenger.id
+                    )
+                )
+                if not rating_exists.scalar_one_or_none():
+                    # Получаем имя водителя
+                    driver_result = await session.execute(
+                        select(User).where(User.id == order.customer_id)
+                    )
+                    driver = driver_result.scalar_one_or_none()
+                    driver_name = driver.full_name if driver else "водитель"
+                    
+                    local_date = utc_to_local(order.date)
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text=f"⭐ Оценить водителя {driver_name}",
+                                callback_data=f"rate_user:{order.id}:{order.customer_id}"
+                            )]
+                        ]
+                    )
+                    await callback.message.answer(
+                        f"📝 **Оставьте отзыв о поездке**\n\n"
+                        f"📍 {order.from_city} → {order.to_city}\n"
+                        f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"Как вам поездка с {driver_name}?",
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+    
+    await callback.answer()
 
 @router.message(F.text == "⭐ Мой рейтинг")
 async def show_rating(message: Message):
@@ -111,9 +254,8 @@ async def support(message: Message):
 @router.callback_query(lambda c: c.data.startswith("delete_account:"))
 async def process_delete_account(callback: CallbackQuery):
     """Запрос на удаление аккаунта"""
-    user_id = int(callback.data.split(":")[1])  # это ID из базы данных
+    user_id = int(callback.data.split(":")[1])
     
-    # Получаем пользователя из БД по его ID
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.id == user_id)
@@ -124,7 +266,6 @@ async def process_delete_account(callback: CallbackQuery):
             await callback.answer("❌ Пользователь не найден!")
             return
         
-        # Сравниваем с telegram_id из БД
         if callback.from_user.id != user.telegram_id:
             await callback.answer("❌ Вы можете удалить только свой аккаунт!")
             return
@@ -148,7 +289,6 @@ async def confirm_delete_account(callback: CallbackQuery):
     """Подтверждение удаления аккаунта"""
     user_id = int(callback.data.split(":")[1])
     
-    # Получаем пользователя по его ID из БД
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.id == user_id)
@@ -160,12 +300,10 @@ async def confirm_delete_account(callback: CallbackQuery):
             await callback.answer()
             return
         
-        # Проверяем, что это тот же пользователь
         if callback.from_user.id != user.telegram_id:
             await callback.answer("❌ Ошибка!")
             return
         
-        # Удаляем пользователя
         await session.delete(user)
         await session.commit()
         

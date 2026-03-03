@@ -13,7 +13,7 @@ router = Router()
 
 @router.message(F.text == "📋 Мои поездки")
 async def my_trips(message: Message, **kwargs):
-    """Показать поездки пассажира"""
+    """Показать ТОЛЬКО АКТИВНЫЕ поездки пассажира"""
     
     async with AsyncSessionLocal() as session:
         # Получаем пассажира
@@ -30,37 +30,34 @@ async def my_trips(message: Message, **kwargs):
             await message.answer("❌ Эта функция доступна только пассажирам!")
             return
         
-        # Ищем заказы, где пассажир забронировал места
-        
+        # Ищем ТОЛЬКО АКТИВНЫЕ заказы, где пассажир забронировал места
         orders_result = await session.execute(
             select(Order).where(
                 or_(
-                    # Поиск в объектном формате [{"id": 2}]
                     cast(Order.booked_passengers, JSONB).contains([{"id": passenger.id}]),
-                    # Поиск в старом формате [2]
                     cast(Order.booked_passengers, JSONB).contains([passenger.id])
-                )
-            ).order_by(Order.date.desc())
+                ),
+                Order.status == OrderStatus.ACTIVE  # Только активные!
+            ).order_by(Order.date)
         )
         orders = orders_result.scalars().all()
-        print(f"🔍 Поиск заказов для пассажира ID={passenger.id}")
-        print(f"📊 Найдено заказов: {len(orders)}")
+        
+        print(f"🔍 Поиск АКТИВНЫХ заказов для пассажира ID={passenger.id}")
+        print(f"📊 Найдено активных заказов: {len(orders)}")
         for o in orders:
-            print(f"  Заказ #{o.id}: статус={o.status}")
+            print(f"  Заказ #{o.id}: статус={o.status}, дата={o.date}")
         
         if not orders:
             await message.answer(
                 "📋 **Мои поездки**\n\n"
-                "У вас пока нет забронированных поездок.\n"
-                "Используйте '🔍 Найти попутчика' для поиска!",
+                "У вас пока нет активных поездок.\n"
+                "Используйте '🔍 Найти попутчика' для поиска!\n\n"
+                "История прошлых поездок доступна в 👤 Мой профиль → 📜 История поездок",
                 parse_mode="Markdown"
             )
             return
         
-        # Разделяем на активные и завершённые
-        active_trips = []
-        completed_trips = []
-        
+        # Показываем активные поездки с кнопками
         for order in orders:
             # Получаем информацию о водителе
             driver_name = "Неизвестен"
@@ -76,89 +73,36 @@ async def my_trips(message: Message, **kwargs):
                     driver_rating = driver.rating
                     driver_id = driver.telegram_id
             
-            # ПРОСТАЯ ЛОГИКА: всё решает статус из БД
-            # Планировщик сам завершит заказы с просроченной датой
-            if order.status == OrderStatus.ACTIVE:
-                active_trips.append((order, driver_name, driver_rating, driver_id))
-            else:
-                completed_trips.append((order, driver_name, driver_rating, driver_id))
-        
-        # Показываем активные поездки с кнопками
-        if active_trips:
-            for order, driver_name, driver_rating, driver_id in active_trips:
-                # Конвертируем UTC в локальное время для отображения
-                local_date = utc_to_local(order.date)
-                
-                text = (
-                    f"🚗 **Текущая поездка**\n\n"
-                    f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                    f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
-                    f"🚗 **Водитель:** {driver_name} ⭐ {driver_rating:.1f}\n"
-                    f"💰 **Цена:** {order.price} руб.\n\n"
-                )
-                
-                # Кнопки для активной поездки
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="📞 Связаться с водителем",
-                                callback_data=f"contact_driver_from_trip:{order.id}"
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="❌ Отменить бронь",
-                                callback_data=f"cancel_booking:{order.id}"
-                            )
-                        ]
-                    ]
-                )
-                
-                await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
-        else:
-            await message.answer("📋 **Нет активных поездок**", parse_mode="Markdown")
-        
-        # Показываем завершённые поездки с кнопками оценки
-        if completed_trips:
-            text = "✅ **История поездок**\n\n"
-            for order, driver_name, driver_rating, _ in completed_trips[:5]:
-                local_date = utc_to_local(order.date)
-                text += (
-                    f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                    f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
-                    f"🚗 **Водитель:** {driver_name} ⭐ {driver_rating:.1f}\n"
-                    f"💰 **Цена:** {order.price} руб.\n\n"
-                )
-            await message.answer(text, parse_mode="Markdown")
+            # Конвертируем UTC в локальное время для отображения
+            local_date = utc_to_local(order.date)
             
-            # Добавляем кнопки оценки для каждой завершённой поездки
-            for order, driver_name, driver_rating, driver_id in completed_trips:
-                # Проверяем, не оценивали ли уже
-                rating_exists = await session.execute(
-                    select(Rating).where(
-                        Rating.order_id == order.id,
-                        Rating.rater_id == passenger.id
-                    )
-                )
-                if not rating_exists.scalar_one_or_none() and order.customer_id:
-                    local_date = utc_to_local(order.date)
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text=f"⭐ Оценить водителя {driver_name}",
-                                callback_data=f"rate_user:{order.id}:{order.customer_id}"
-                            )]
-                        ]
-                    )
-                    await message.answer(
-                        f"📝 **Оставьте отзыв о поездке**\n\n"
-                        f"📍 {order.from_city} → {order.to_city}\n"
-                        f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n\n"
-                        f"Как вам поездка с {driver_name}?",
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
+            text = (
+                f"🚗 **Текущая поездка**\n\n"
+                f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
+                f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚗 **Водитель:** {driver_name} ⭐ {driver_rating:.1f}\n"
+                f"💰 **Цена:** {order.price} руб.\n\n"
+            )
+            
+            # Кнопки для активной поездки
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="📞 Связаться с водителем",
+                            callback_data=f"contact_driver_from_trip:{order.id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отменить бронь",
+                            callback_data=f"cancel_booking:{order.id}"
+                        )
+                    ]
+                ]
+            )
+            
+            await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @router.callback_query(lambda c: c.data.startswith("cancel_booking:"))
 async def cancel_booking(callback: CallbackQuery):
@@ -194,19 +138,17 @@ async def cancel_booking(callback: CallbackQuery):
         if order.booked_passengers:
             for p in order.booked_passengers:
                 if isinstance(p, dict) and p.get('id') == passenger.id:
-                    seats_removed = p.get('seats', 1)  # Сколько мест отменяем
-                    # НЕ добавляем этого пассажира
-                elif isinstance(p, int) and p == passenger.id:  # Старый формат
+                    seats_removed = p.get('seats', 1)
+                elif isinstance(p, int) and p == passenger.id:
                     seats_removed = 1
-                    # НЕ добавляем
                 else:
-                    new_passengers.append(p)  # Оставляем других пассажиров
+                    new_passengers.append(p)
         
         if seats_removed == 0:
             await callback.answer("❌ Вы не бронировали это место", show_alert=True)
             return
         
-        # Получаем водителя ДО обновления
+        # Получаем водителя
         driver_result = await session.execute(
             select(User).where(User.id == order.customer_id)
         )
@@ -218,7 +160,7 @@ async def cancel_booking(callback: CallbackQuery):
         
         await session.commit()
         
-        # Отправляем уведомление пассажиру с правильным временем
+        # Отправляем уведомление пассажиру
         await callback.message.edit_text(
             "✅ **Бронь успешно отменена!**\n\n"
             f"📍 {order.from_city} → {order.to_city}\n"
@@ -227,7 +169,7 @@ async def cancel_booking(callback: CallbackQuery):
             parse_mode="Markdown"
         )
         
-        # Уведомляем водителя с ПРАВИЛЬНЫМ подсчётом мест и временем
+        # Уведомляем водителя
         if driver:
             available_seats = order.total_seats - order.booked_seats
             
