@@ -71,10 +71,6 @@ async def cmd_create_order(message: Message, state: FSMContext, **kwargs):
                 parse_mode="Markdown"
             )
             return
-        
-        # Проверка 2: не больше 1 заказа на одну дату
-        # Но мы пока не знаем дату, поэтому эту проверку добавим позже
-        # в функции save_order
     
     # Сохраняем роль пользователя в состояние
     await state.update_data(role=user.role)
@@ -175,7 +171,7 @@ async def process_to(message: Message, state: FSMContext):
 
 @router.message(OrderStates.waiting_for_date)
 async def process_date(message: Message, state: FSMContext):
-    """Обработка даты"""
+    """Обработка даты с проверкой на дубликат заказа"""
     # Проверка отмены
     if await check_cancel(message, state):
         return
@@ -195,7 +191,39 @@ async def process_date(message: Message, state: FSMContext):
                 reply_markup=get_cancel_keyboard()
             )
             return
+        
+        # === НОВАЯ ПРОВЕРКА: есть ли уже заказ на эту дату ===
+        async with AsyncSessionLocal() as session:
+            # Получаем пользователя
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
             
+            if user and user.role == UserRole.DRIVER:
+                # Проверяем, есть ли активный заказ на эту дату
+                existing_order_result = await session.execute(
+                    select(Order).where(
+                        Order.customer_id == user.id,
+                        Order.status == OrderStatus.ACTIVE,
+                        func.date(Order.date) == date.date()
+                    )
+                )
+                existing_order = existing_order_result.scalar_one_or_none()
+                
+                if existing_order:
+                    await message.answer(
+                        f"❌ **У вас уже есть активный заказ на эту дату!**\n\n"
+                        f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
+                        f"📍 Маршрут: {existing_order.from_city} → {existing_order.to_city}\n\n"
+                        f"Вы можете создать только **один заказ в день**.\n"
+                        f"Попробуйте выбрать другую дату.",
+                        parse_mode="Markdown",
+                        reply_markup=get_cancel_keyboard()
+                    )
+                    return
+        
+        # Если всё хорошо - сохраняем дату и идём дальше
         await state.update_data(date=date)
         
     except ValueError:
@@ -320,7 +348,7 @@ async def process_price(message: Message, state: FSMContext):
     if role == UserRole.DRIVER:
         # Для водителя спрашиваем количество мест
         await message.answer(
-            "🪑 Сколько **всего мест** в машине?\n"
+            "🪑 Сколько **всего мест** для пассажиров в машине?\n"
             "Введите число (например: 4, 5, 7):",
             parse_mode="Markdown",
             reply_markup=get_cancel_keyboard()
@@ -442,32 +470,8 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         )
         user = user_result.scalar_one()
         
-        # ДЛЯ ВОДИТЕЛЯ: проверяем, нет ли уже заказа на эту дату
-        if role == UserRole.DRIVER:
-            utc_datetime = data['utc_datetime']
-            
-            existing_order_result = await session.execute(
-                select(Order).where(
-                    Order.customer_id == user.id,
-                    Order.status == OrderStatus.ACTIVE,
-                    func.date(Order.date) == utc_datetime.date()
-                )
-            )
-            existing_order = existing_order_result.scalar_one_or_none()
-            
-            if existing_order:
-                # Конвертируем UTC время в локальное для отображения
-                local_date = utc_to_local(utc_datetime)
-                
-                await message.answer(
-                    f"❌ **У вас уже есть активный заказ на эту дату!**\n\n"
-                    f"📅 Дата: {local_date.strftime('%d.%m.%Y')}\n"
-                    f"📍 Маршрут: {existing_order.from_city} → {existing_order.to_city}\n\n"
-                    f"Вы можете создать только **один заказ в день**.",
-                    parse_mode="Markdown"
-                )
-                await state.clear()
-                return
+        # Проверка НЕ НУЖНА - она уже выполнена в process_date!
+        # (комментарий, код удалён)
         
         # Создаем заказ с UTC временем
         order = Order(
