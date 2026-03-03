@@ -21,7 +21,7 @@ router = Router()
 
 @router.message(F.text == "📋 Мои заказы")
 async def my_orders(message: Message, **kwargs):
-    """Показать заказы водителя (активные и завершённые с оценками)"""
+    """Показать ТОЛЬКО АКТИВНЫЕ заказы водителя"""
     
     async with AsyncSessionLocal() as session:
         # Получаем водителя
@@ -41,7 +41,7 @@ async def my_orders(message: Message, **kwargs):
         # Используем UTC время для сравнения
         now_utc = get_utc_now()
         
-        # === 1. Получаем АКТИВНЫЕ заказы ===
+        # Получаем ТОЛЬКО АКТИВНЫЕ заказы
         active_orders_result = await session.execute(
             select(Order).where(
                 Order.customer_id == driver.id,
@@ -51,17 +51,7 @@ async def my_orders(message: Message, **kwargs):
         )
         active_orders = active_orders_result.scalars().all()
         
-        # === 2. Получаем ЗАВЕРШЁННЫЕ заказы (для оценки) ===
-        completed_orders_result = await session.execute(
-            select(Order).where(
-                Order.customer_id == driver.id,
-                Order.status == OrderStatus.COMPLETED,
-                Order.date < now_utc
-            ).order_by(Order.date.desc())  # Сортируем от новых к старым
-        )
-        completed_orders = completed_orders_result.scalars().all()
-        
-        # === Отображаем АКТИВНЫЕ заказы ===
+        # Отображаем активные заказы
         if active_orders:
             for order in active_orders:
                 # Получаем информацию о пассажирах
@@ -130,62 +120,10 @@ async def my_orders(message: Message, **kwargs):
         else:
             await message.answer(
                 "📋 **Активные заказы**\n\n"
-                "У вас пока нет активных заказов.",
+                "У вас пока нет активных заказов.\n\n"
+                "История прошлых поездок доступна в 👤 Мой профиль → 🚗 Мои поездки",
                 parse_mode="Markdown"
             )
-        
-        # === ИСПРАВЛЕНО: Отображаем ТОЛЬКО ПОСЛЕДНИЙ завершённый заказ с кнопками оценки ===
-        if completed_orders:
-            # Берём только самый последний завершённый заказ
-            last_completed_order = completed_orders[0]
-            
-            if last_completed_order.booked_passengers and len(last_completed_order.booked_passengers) > 0:
-                for passenger_data in last_completed_order.booked_passengers:
-                    # Определяем формат данных пассажира
-                    if isinstance(passenger_data, dict):
-                        passenger_id = passenger_data.get('id')
-                        seats_count = passenger_data.get('seats', 1)
-                    else:
-                        passenger_id = passenger_data
-                        seats_count = 1
-                    
-                    # Получаем данные пассажира
-                    passenger_result = await session.execute(
-                        select(User).where(User.id == passenger_id)
-                    )
-                    passenger = passenger_result.scalar_one_or_none()
-                    
-                    if passenger:
-                        # Проверяем, не оценивал ли уже водитель этого пассажира
-                        rating_exists = await session.execute(
-                            select(Rating).where(
-                                Rating.order_id == last_completed_order.id,
-                                Rating.rater_id == driver.id,
-                                Rating.rated_user_id == passenger.id
-                            )
-                        )
-                        
-                        if not rating_exists.scalar_one_or_none():
-                            # Кнопка для оценки пассажира
-                            rating_keyboard = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [InlineKeyboardButton(
-                                        text=f"⭐ Оценить пассажира {passenger.full_name}",
-                                        callback_data=f"rate_passenger:{last_completed_order.id}:{passenger.id}"
-                                    )]
-                                ]
-                            )
-                            
-                            rating_text = (
-                                f"📝 **Оцените пассажира из последней поездки**\n\n"
-                                f"📍 Маршрут: {last_completed_order.from_city} → {last_completed_order.to_city}\n"
-                                f"📅 Дата: {format_datetime(last_completed_order.date, '%d.%m.%Y %H:%M')}\n"
-                                f"👤 Пассажир: {passenger.full_name}\n"
-                                f"🪑 Забронировано мест: {seats_count}\n\n"
-                                f"Как прошла поездка? Оцените пассажира!"
-                            )
-                            
-                            await message.answer(rating_text, parse_mode="Markdown", reply_markup=rating_keyboard)
 
 @router.callback_query(lambda c: c.data.startswith("cancel_order:"))
 async def cancel_order(callback: CallbackQuery):
