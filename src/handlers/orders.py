@@ -171,7 +171,7 @@ async def process_to(message: Message, state: FSMContext):
 
 @router.message(OrderStates.waiting_for_date)
 async def process_date(message: Message, state: FSMContext):
-    """Обработка даты с проверкой на дубликат заказа"""
+    """Обработка даты с проверкой на АКТИВНЫЙ заказ"""
     # Проверка отмены
     if await check_cancel(message, state):
         return
@@ -192,7 +192,7 @@ async def process_date(message: Message, state: FSMContext):
             )
             return
         
-        # === НОВАЯ ПРОВЕРКА: есть ли уже заказ на эту дату ===
+        # === ИСПРАВЛЕННАЯ ПРОВЕРКА: ищем только АКТИВНЫЕ заказы ===
         async with AsyncSessionLocal() as session:
             # Получаем пользователя
             user_result = await session.execute(
@@ -201,27 +201,58 @@ async def process_date(message: Message, state: FSMContext):
             user = user_result.scalar_one_or_none()
             
             if user and user.role == UserRole.DRIVER:
-                # Проверяем, есть ли активный заказ на эту дату
-                existing_order_result = await session.execute(
+                # Проверяем, есть ли АКТИВНЫЙ заказ на эту дату
+                existing_active_order_result = await session.execute(
                     select(Order).where(
                         Order.customer_id == user.id,
-                        Order.status == OrderStatus.ACTIVE,
+                        Order.status == OrderStatus.ACTIVE,  # Только ACTIVE!
                         func.date(Order.date) == date.date()
                     )
                 )
-                existing_order = existing_order_result.scalar_one_or_none()
+                existing_active_order = existing_active_order_result.scalar_one_or_none()
                 
-                if existing_order:
+                if existing_active_order:
+                    # Получаем данные из состояния для нового заказа
+                    data = await state.get_data()
+                    new_from = data.get('from_city', '?')
+                    new_to = data.get('to_city', '?')
+                    
                     await message.answer(
-                        f"❌ **У вас уже есть активный заказ на эту дату!**\n\n"
+                        f"❌ **У вас уже есть АКТИВНЫЙ заказ на эту дату!**\n\n"
                         f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
-                        f"📍 Маршрут: {existing_order.from_city} → {existing_order.to_city}\n\n"
-                        f"Вы можете создать только **один заказ в день**.\n"
-                        f"Попробуйте выбрать другую дату.",
+                        f"📍 Маршрут активного заказа: {existing_active_order.from_city} → {existing_active_order.to_city}\n"
+                        f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
+                        f"Вы можете создать только **один АКТИВНЫЙ заказ в день**.\n"
+                        f"Чтобы создать новый заказ, сначала отмените или дождитесь завершения существующего.",
                         parse_mode="Markdown",
                         reply_markup=get_cancel_keyboard()
                     )
                     return
+                
+                # Проверяем, есть ли ОТМЕНЁННЫЙ заказ на эту дату (просто для информации)
+                existing_cancelled_order_result = await session.execute(
+                    select(Order).where(
+                        Order.customer_id == user.id,
+                        Order.status == OrderStatus.CANCELLED,
+                        func.date(Order.date) == date.date()
+                    )
+                )
+                existing_cancelled_order = existing_cancelled_order_result.scalar_one_or_none()
+                
+                if existing_cancelled_order:
+                    # Информируем, но НЕ БЛОКИРУЕМ создание нового заказа
+                    data = await state.get_data()
+                    new_from = data.get('from_city', '?')
+                    new_to = data.get('to_city', '?')
+                    
+                    await message.answer(
+                        f"ℹ️ **На эту дату был отменённый заказ**\n\n"
+                        f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
+                        f"📍 Отменённый маршрут: {existing_cancelled_order.from_city} → {existing_cancelled_order.to_city}\n"
+                        f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
+                        f"Вы можете создать новый заказ, так как старый был отменён.",
+                        parse_mode="Markdown"
+                    )
         
         # Если всё хорошо - сохраняем дату и идём дальше
         await state.update_data(date=date)
