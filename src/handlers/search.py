@@ -456,6 +456,9 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Заполните все поля!", show_alert=True)
         return
     
+    # ИСПРАВЛЕНИЕ: получаем текущее UTC время
+    now_utc = get_utc_now()
+    
     async with AsyncSessionLocal() as session:
         # Получаем пассажира
         passenger_result = await session.execute(
@@ -482,7 +485,7 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
                 Order.from_city.ilike(f"%{from_city}%"),
                 Order.to_city.ilike(f"%{to_city}%"),
                  Order.date >= now_utc,  # ← ДОБАВЛЕНО! Только будущие поездки
-                Order.date >= utc_start,
+                #Order.date >= utc_start,  #поездки с начала выбранного дня
                 Order.date <= utc_end
             ).order_by(Order.date)
         )
