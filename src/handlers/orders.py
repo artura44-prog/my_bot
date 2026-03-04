@@ -477,7 +477,7 @@ async def process_back_seats(message: Message, state: FSMContext):
         )
         return
     
-    await state.update_data(back_seats=back_seats)
+    await state.update_data(seats_back_row=back_seats)
     
     # Получаем роль
     data = await state.get_data()
