@@ -50,9 +50,9 @@ async def search_passenger(message: Message, state: FSMContext, **kwargs):
     await state.clear()
     
     # Показываем меню фильтров
-    await show_filters_menu(message, state)
+    await show_filters_menu(message, state, edit=False)  # новое сообщение
 
-async def show_filters_menu(message: Message, state: FSMContext):
+async def show_filters_menu(message: Message, state: FSMContext, edit: bool = True):
     """Отображает меню фильтров с текущим состоянием"""
     data = await state.get_data()
     
@@ -129,11 +129,16 @@ async def show_filters_menu(message: Message, state: FSMContext):
     
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
-    # Если это обновление существующего сообщения
-    if hasattr(message, 'edit_text'):
-        await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    else:
+    # ИСПРАВЛЕНО: добавляем try-except для обработки ошибок редактирования
+    try:
+        if edit:
+            await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        else:
+            await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        # Если не удалось отредактировать, отправляем новое сообщение
         await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+    
 
 # --- Обработчики установки фильтров ---
 
@@ -169,7 +174,8 @@ async def process_from_city(message: Message, state: FSMContext):
         return
     
     await state.update_data(from_city=from_city)
-    await show_filters_menu(message, state)
+    # ИСПРАВЛЕНО: используем edit=False для новых сообщений
+    await show_filters_menu(message, state, edit=False)
 
 @router.callback_query(lambda c: c.data == "set_to")
 async def set_to_city(callback: CallbackQuery, state: FSMContext):
@@ -202,7 +208,8 @@ async def process_to_city(message: Message, state: FSMContext):
         return
     
     await state.update_data(to_city=to_city)
-    await show_filters_menu(message, state)
+    # ИСПРАВЛЕНО: используем edit=False для новых сообщений
+    await show_filters_menu(message, state, edit=False)
 
 @router.callback_query(lambda c: c.data == "set_date")
 async def set_date(callback: CallbackQuery, state: FSMContext):
@@ -305,7 +312,8 @@ async def process_manual_date(message: Message, state: FSMContext):
             return
         
         await state.update_data(date=selected_date)
-        await show_filters_menu(message, state)
+        # ИСПРАВЛЕНО: используем edit=False для новых сообщений
+        await show_filters_menu(message, state, edit=False)
     except ValueError:
         await message.answer(
             "❌ Неверный формат даты!\n"
