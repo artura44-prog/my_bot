@@ -87,8 +87,13 @@ async def start_rating(callback: CallbackQuery, state: FSMContext):
         # Показываем клавиатуру с оценками
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⭐" * i, callback_data=f"set_rating:{i}") 
-                 for i in range(1, 6)]
+                [
+                    InlineKeyboardButton(text="1⭐", callback_data=f"set_rating:1"),
+                    InlineKeyboardButton(text="2⭐", callback_data=f"set_rating:2"),
+                    InlineKeyboardButton(text="3⭐", callback_data=f"set_rating:3"),
+                    InlineKeyboardButton(text="4⭐", callback_data=f"set_rating:4"),
+                    InlineKeyboardButton(text="5⭐", callback_data=f"set_rating:5"),
+                ]
             ]
         )
         
@@ -188,8 +193,13 @@ async def rate_passenger(callback: CallbackQuery, state: FSMContext):
         # Показываем клавиатуру с оценками
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⭐" * i, callback_data=f"set_rating:{i}") 
-                 for i in range(1, 6)]
+                [
+                    InlineKeyboardButton(text="1⭐", callback_data=f"set_rating:1"),
+                    InlineKeyboardButton(text="2⭐", callback_data=f"set_rating:2"),
+                    InlineKeyboardButton(text="3⭐", callback_data=f"set_rating:3"),
+                    InlineKeyboardButton(text="4⭐", callback_data=f"set_rating:4"),
+                    InlineKeyboardButton(text="5⭐", callback_data=f"set_rating:5"),
+                ]
             ]
         )
         
