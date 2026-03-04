@@ -3,24 +3,33 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
-from datetime import datetime
+from sqlalchemy import select, and_
+from datetime import datetime, timedelta
 
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus
 from src.utils.encryption import phone_encryptor
-from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local
+from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local, local_to_utc
+from src.keyboards.main import get_passenger_main_menu
 
 router = Router()
 
 # Состояния для отправки сообщения водителю
 class MessageStates(StatesGroup):
     waiting_for_message = State()
-    waiting_for_driver_reply = State() 
+    waiting_for_driver_reply = State()
+
+# НОВЫЕ состояния для фильтров поиска
+class SearchFiltersStates(StatesGroup):
+    waiting_for_from = State()      # Ожидание города отправления
+    waiting_for_to = State()        # Ожидание города назначения
+    waiting_for_date = State()      # Ожидание даты
+
+# ==================== НОВЫЙ ФУНКЦИОНАЛ ПОИСКА С ФИЛЬТРАМИ ====================
 
 @router.message(F.text == "🔍 Найти попутчика")
-async def search_passenger(message: Message, **kwargs):
-    """Поиск попутчиков для пассажиров"""
+async def search_passenger(message: Message, state: FSMContext, **kwargs):
+    """Поиск попутчиков для пассажиров с обязательными фильтрами"""
     
     async with AsyncSessionLocal() as session:
         # Проверяем регистрацию и роль
@@ -36,39 +45,388 @@ async def search_passenger(message: Message, **kwargs):
         if user.role != UserRole.PASSENGER:
             await message.answer("❌ Эта функция доступна только пассажирам!")
             return
+    
+    # Очищаем предыдущие фильтры
+    await state.clear()
+    
+    # Показываем меню фильтров
+    await show_filters_menu(message, state)
+
+async def show_filters_menu(message: Message, state: FSMContext):
+    """Отображает меню фильтров с текущим состоянием"""
+    data = await state.get_data()
+    
+    # Получаем текущие значения фильтров
+    from_city = data.get('from_city')
+    to_city = data.get('to_city')
+    date = data.get('date')
+    
+    # Формируем текст меню
+    text = "🔍 **Поиск попутчиков**\n\n"
+    text += "Для поиска необходимо указать:\n"
+    text += "✅ Город отправления\n"
+    text += "✅ Город назначения\n"
+    text += "✅ Дату поездки\n\n"
+    text += "Все поля обязательны для заполнения!\n\n"
+    
+    # Формируем клавиатуру
+    keyboard = []
+    
+    # Кнопка города отправления
+    if from_city:
+        keyboard.append([InlineKeyboardButton(
+            text=f"📍 {from_city} ✓", 
+            callback_data="edit_from"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            text="📍 Город отправления", 
+            callback_data="set_from"
+        )])
+    
+    # Кнопка города назначения
+    if to_city:
+        keyboard.append([InlineKeyboardButton(
+            text=f"🏁 {to_city} ✓", 
+            callback_data="edit_to"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            text="🏁 Город назначения", 
+            callback_data="set_to"
+        )])
+    
+    # Кнопка даты
+    if date:
+        date_str = date.strftime('%d.%m.%Y')
+        keyboard.append([InlineKeyboardButton(
+            text=f"📅 {date_str} ✓", 
+            callback_data="edit_date"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            text="📅 Дата", 
+            callback_data="set_date"
+        )])
+    
+    # Кнопка поиска (активна только если все поля заполнены)
+    if from_city and to_city and date:
+        keyboard.append([InlineKeyboardButton(
+            text="🔍 Найти поездки", 
+            callback_data="perform_search"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            text="🔍 Найти (заполните все поля)", 
+            callback_data="disabled"
+        )])
+    
+    # Кнопка возврата в главное меню
+    keyboard.append([InlineKeyboardButton(
+        text="◀️ В главное меню", 
+        callback_data="back_to_main"
+    )])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    # Если это обновление существующего сообщения
+    if hasattr(message, 'edit_text'):
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+# --- Обработчики установки фильтров ---
+
+@router.callback_query(lambda c: c.data == "set_from")
+async def set_from_city(callback: CallbackQuery, state: FSMContext):
+    """Установка города отправления"""
+    await callback.message.edit_text(
+        "📍 Введите **город отправления**:\n"
+        "Например: Уфа, Стерлитамак, Салават",
+        parse_mode="Markdown"
+    )
+    
+    # Кнопка отмены
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")]
+        ]
+    )
+    await callback.message.answer("Введите название города:", reply_markup=keyboard)
+    await state.set_state(SearchFiltersStates.waiting_for_from)
+    await callback.answer()
+
+@router.message(SearchFiltersStates.waiting_for_from)
+async def process_from_city(message: Message, state: FSMContext):
+    """Обработка введенного города отправления"""
+    from_city = message.text.strip()
+    
+    if len(from_city) < 3:
+        await message.answer(
+            "❌ Название города слишком короткое!\n"
+            "Пожалуйста, введите корректное название (минимум 3 символа):"
+        )
+        return
+    
+    await state.update_data(from_city=from_city)
+    await show_filters_menu(message, state)
+
+@router.callback_query(lambda c: c.data == "set_to")
+async def set_to_city(callback: CallbackQuery, state: FSMContext):
+    """Установка города назначения"""
+    await callback.message.edit_text(
+        "🏁 Введите **город назначения**:\n"
+        "Например: Акъяр, Магнитогорск, Сибай",
+        parse_mode="Markdown"
+    )
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")]
+        ]
+    )
+    await callback.message.answer("Введите название города:", reply_markup=keyboard)
+    await state.set_state(SearchFiltersStates.waiting_for_to)
+    await callback.answer()
+
+@router.message(SearchFiltersStates.waiting_for_to)
+async def process_to_city(message: Message, state: FSMContext):
+    """Обработка введенного города назначения"""
+    to_city = message.text.strip()
+    
+    if len(to_city) < 3:
+        await message.answer(
+            "❌ Название города слишком короткое!\n"
+            "Пожалуйста, введите корректное название (минимум 3 символа):"
+        )
+        return
+    
+    await state.update_data(to_city=to_city)
+    await show_filters_menu(message, state)
+
+@router.callback_query(lambda c: c.data == "set_date")
+async def set_date(callback: CallbackQuery, state: FSMContext):
+    """Установка даты"""
+    # Создаем клавиатуру с быстрым выбором даты
+    today = datetime.now().date()
+    dates_keyboard = []
+    
+    # Кнопки для выбора даты (2 недели вперед, по 3 в ряд)
+    for i in range(0, 14, 3):
+        row = []
+        for j in range(3):
+            day_offset = i + j
+            if day_offset < 14:
+                date = today + timedelta(days=day_offset)
+                date_str = date.strftime("%d.%m")
+                row.append(InlineKeyboardButton(
+                    text=date_str, 
+                    callback_data=f"select_date:{date.strftime('%d.%m.%Y')}"
+                ))
+        dates_keyboard.append(row)
+    
+    # Добавляем ручной ввод
+    dates_keyboard.append([InlineKeyboardButton(
+        text="✏️ Ввести вручную", 
+        callback_data="manual_date"
+    )])
+    
+    # Кнопка отмены
+    dates_keyboard.append([InlineKeyboardButton(
+        text="◀️ Назад к фильтрам", 
+        callback_data="back_to_filters"
+    )])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=dates_keyboard)
+    
+    await callback.message.edit_text(
+        "📅 Выберите **дату поездки**:\n\n"
+        "Нажмите на дату из списка или введите вручную.\n"
+        "❗️ Дата должна быть не раньше сегодняшнего дня",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("select_date:"))
+async def select_date(callback: CallbackQuery, state: FSMContext):
+    """Выбор даты из предложенных"""
+    date_str = callback.data.split(":")[1]
+    
+    try:
+        selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
         
-        # Используем UTC время для сравнения
-        now_utc = get_utc_now()
+        # Проверяем, что дата не в прошлом
+        today = datetime.now().date()
+        if selected_date < today:
+            await callback.answer("❌ Нельзя выбрать прошедшую дату!", show_alert=True)
+            return
         
-        # Ищем активные заказы водителей (будущие поездки)
+        await state.update_data(date=selected_date)
+        await show_filters_menu(callback.message, state)
+    except ValueError:
+        await callback.answer("❌ Ошибка в дате", show_alert=True)
+    
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "manual_date")
+async def manual_date(callback: CallbackQuery, state: FSMContext):
+    """Ручной ввод даты"""
+    await callback.message.edit_text(
+        "📅 Введите **дату поездки** в формате ДД.ММ.ГГГГ\n"
+        "Например: 25.12.2026\n\n"
+        "❗️ Дата должна быть не раньше сегодняшнего дня"
+    )
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад к выбору даты", callback_data="set_date")]
+        ]
+    )
+    await callback.message.answer("Введите дату:", reply_markup=keyboard)
+    await state.set_state(SearchFiltersStates.waiting_for_date)
+    await callback.answer()
+
+@router.message(SearchFiltersStates.waiting_for_date)
+async def process_manual_date(message: Message, state: FSMContext):
+    """Обработка введенной вручную даты"""
+    date_str = message.text.strip()
+    
+    try:
+        selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
+        
+        # Проверяем, что дата не в прошлом
+        today = datetime.now().date()
+        if selected_date < today:
+            await message.answer(
+                "❌ Дата не может быть в прошлом!\n"
+                "Пожалуйста, введите будущую дату:"
+            )
+            return
+        
+        await state.update_data(date=selected_date)
+        await show_filters_menu(message, state)
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат даты!\n"
+            "Используйте формат ДД.ММ.ГГГГ\n"
+            "Например: 25.12.2026"
+        )
+
+# --- Обработчики редактирования ---
+
+@router.callback_query(lambda c: c.data == "edit_from")
+async def edit_from_city(callback: CallbackQuery, state: FSMContext):
+    """Редактирование города отправления"""
+    await set_from_city(callback, state)
+
+@router.callback_query(lambda c: c.data == "edit_to")
+async def edit_to_city(callback: CallbackQuery, state: FSMContext):
+    """Редактирование города назначения"""
+    await set_to_city(callback, state)
+
+@router.callback_query(lambda c: c.data == "edit_date")
+async def edit_date(callback: CallbackQuery, state: FSMContext):
+    """Редактирование даты"""
+    await set_date(callback, state)
+
+@router.callback_query(lambda c: c.data == "back_to_filters")
+async def back_to_filters(callback: CallbackQuery, state: FSMContext):
+    """Возврат к меню фильтров"""
+    await show_filters_menu(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    """Возврат в главное меню"""
+    await state.clear()
+    await callback.message.answer(
+        "👋 **Главное меню**",
+        parse_mode="Markdown",
+        reply_markup=get_passenger_main_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "disabled")
+async def disabled_button(callback: CallbackQuery):
+    """Заглушка для неактивной кнопки"""
+    await callback.answer("❌ Сначала заполните все поля!", show_alert=True)
+
+# --- Выполнение поиска с фильтрами ---
+
+@router.callback_query(lambda c: c.data == "perform_search")
+async def perform_search(callback: CallbackQuery, state: FSMContext):
+    """Выполнение поиска с применением фильтров"""
+    data = await state.get_data()
+    
+    from_city = data.get('from_city')
+    to_city = data.get('to_city')
+    date = data.get('date')
+    
+    if not from_city or not to_city or not date:
+        await callback.answer("❌ Заполните все поля!", show_alert=True)
+        return
+    
+    async with AsyncSessionLocal() as session:
+        # Получаем пассажира
+        passenger_result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        passenger = passenger_result.scalar_one_or_none()
+        
+        if not passenger:
+            await callback.answer("❌ Сначала зарегистрируйтесь!", show_alert=True)
+            return
+        
+        # Ищем поездки с фильтрами
+        start_of_day = datetime.combine(date, datetime.min.time())
+        end_of_day = datetime.combine(date, datetime.max.time())
+        
+        # Используем UTC для поиска
+        utc_start = local_to_utc(start_of_day)
+        utc_end = local_to_utc(end_of_day)
+        
         orders_result = await session.execute(
             select(Order).where(
                 Order.order_type == UserRole.DRIVER,
                 Order.status == OrderStatus.ACTIVE,
-                Order.date >= now_utc  # Только будущие поездки (в UTC)
+                Order.from_city.ilike(f"%{from_city}%"),
+                Order.to_city.ilike(f"%{to_city}%"),
+                Order.date >= utc_start,
+                Order.date <= utc_end
             ).order_by(Order.date)
         )
         orders = orders_result.scalars().all()
         
         if not orders:
-            await message.answer(
-                "🚫 **Нет активных поездок**\n\n"
-                "На данный момент нет доступных предложений от водителей.\n"
-                "Попробуйте позже!",
+            await callback.message.answer(
+                f"🚫 **Нет активных поездок**\n\n"
+                f"📍 {from_city} → {to_city}\n"
+                f"📅 {date.strftime('%d.%m.%Y')}\n\n"
+                f"• Попробуйте изменить параметры поиска\n"
+                f"• Или поищите на другую дату",
                 parse_mode="Markdown"
             )
+            
+            # Кнопка нового поиска
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
+                ]
+            )
+            await callback.message.answer("Хотите попробовать снова?", reply_markup=keyboard)
+            await callback.answer()
             return
         
-        # Отправляем заказы
-        count = 0
+        # Отправляем найденные поездки
+        await callback.message.answer(
+            f"✅ **Найдено поездок: {len(orders)}**\n\n"
+            f"📍 {from_city} → {to_city}\n"
+            f"📅 {date.strftime('%d.%m.%Y')}\n",
+            parse_mode="Markdown"
+        )
+        
         for order in orders:
-            if count >= 5:
-                await message.answer(
-                    "🔍 Показаны первые 5 поездок.\n"
-                    "Используйте фильтры для более точного поиска."
-                )
-                break
-            
             # Получаем информацию о водителе
             driver_info = "Информация недоступна"
             if order.customer_id:
@@ -79,7 +437,6 @@ async def search_passenger(message: Message, **kwargs):
                 if driver:
                     driver_info = f"{driver.full_name}, ⭐ {driver.rating:.1f}"
             
-            # Формируем текст заказа (конвертируем UTC в локальное время)
             local_date = utc_to_local(order.date)
             
             text = (
@@ -92,7 +449,6 @@ async def search_passenger(message: Message, **kwargs):
                 f"👤 **Водитель:** {driver_info}\n"
             )
             
-            # Кнопки для заказа
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -110,8 +466,22 @@ async def search_passenger(message: Message, **kwargs):
                 ]
             )
             
-            await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
-            count += 1
+            await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        
+        # Кнопка нового поиска
+        new_search_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
+            ]
+        )
+        await callback.message.answer(
+            "Хотите выполнить новый поиск?",
+            reply_markup=new_search_keyboard
+        )
+    
+    await callback.answer()
+
+# ==================== СТАРЫЙ ФУНКЦИОНАЛ (БЕЗ ИЗМЕНЕНИЙ) ====================
 
 @router.callback_query(lambda c: c.data.startswith("contact_driver:"))
 async def contact_driver(callback: CallbackQuery, state: FSMContext):

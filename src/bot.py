@@ -7,7 +7,15 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import select
 
-from src.handlers import registration, profile, orders, passenger_trips, search, driver_orders, ratings
+from src.handlers import (
+    registration,
+    profile,
+    orders,
+    passenger_trips,
+    search,  # ← ЭТОТ ИМПОРТ
+    driver_orders,
+    ratings
+)
 from src.handlers.check_auth import check_registration, get_user_role, registration_required
 from src.database import init_db, AsyncSessionLocal
 from src.models import User, UserRole
