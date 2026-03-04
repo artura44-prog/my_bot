@@ -266,12 +266,15 @@ async def driver_history(callback: CallbackQuery):
         
         completed_count = 0
         cancelled_count = 0
+        completed_orders_list = []  # Сохраняем завершённые заказы для последующей обработки
         
         for order in orders:
             local_date = utc_to_local(order.date)
             
             # Получаем информацию о пассажирах
             passengers_info = ""
+            passenger_ids = []  # Сохраняем ID пассажиров для проверки оценок
+            
             if order.booked_passengers and len(order.booked_passengers) > 0:
                 for passenger_data in order.booked_passengers:
                     if isinstance(passenger_data, dict):
@@ -286,6 +289,7 @@ async def driver_history(callback: CallbackQuery):
                         passenger_name = passenger.full_name if passenger else f"ID {passenger_id}"
                         
                         passengers_info += f"    👤 {passenger_name} - {seats_count} мест\n"
+                        passenger_ids.append(passenger_id)
                     else:
                         passenger_id = passenger_data
                         passenger_result = await session.execute(
@@ -294,6 +298,7 @@ async def driver_history(callback: CallbackQuery):
                         passenger = passenger_result.scalar_one_or_none()
                         passenger_name = passenger.full_name if passenger else f"ID {passenger_id}"
                         passengers_info += f"    👤 {passenger_name} - 1 место\n"
+                        passenger_ids.append(passenger_id)
             else:
                 passengers_info = "    🚫 Нет пассажиров\n"
             
@@ -308,6 +313,7 @@ async def driver_history(callback: CallbackQuery):
             if order.status == OrderStatus.COMPLETED:
                 completed_text += trip_info
                 completed_count += 1
+                completed_orders_list.append((order, passenger_ids))  # Сохраняем заказ и список пассажиров
             else:  # CANCELLED
                 cancelled_text += trip_info
                 cancelled_count += 1
@@ -319,55 +325,61 @@ async def driver_history(callback: CallbackQuery):
         if cancelled_count > 0:
             await callback.message.answer(cancelled_text, parse_mode="Markdown")
         
-        # Добавляем кнопки оценки для последнего завершённого заказа
-        completed_orders = [o for o in orders if o.status == OrderStatus.COMPLETED]
-        if completed_orders:
-            last_completed = completed_orders[0]  # Берём только последний
+        # === ИСПРАВЛЕНО: Добавляем кнопки оценки ТОЛЬКО для ПОСЛЕДНЕГО завершённого заказа ===
+        if completed_orders_list:
+            # Берём только самый последний завершённый заказ
+            last_completed, last_passenger_ids = completed_orders_list[0]  # Самый новый
             
-            if last_completed.booked_passengers and len(last_completed.booked_passengers) > 0:
-                for passenger_data in last_completed.booked_passengers:
-                    if isinstance(passenger_data, dict):
-                        passenger_id = passenger_data.get('id')
-                        seats_count = passenger_data.get('seats', 1)
-                    else:
-                        passenger_id = passenger_data
-                        seats_count = 1
-                    
-                    # Проверяем, не оценивал ли уже
-                    rating_exists = await session.execute(
-                        select(Rating).where(
-                            Rating.order_id == last_completed.id,
-                            Rating.rater_id == driver.id,
-                            Rating.rated_user_id == passenger_id
-                        )
+            # Для каждого пассажира в последнем заказе проверяем, не оценили ли уже
+            for passenger_id in last_passenger_ids:
+                # Проверяем, не оценивал ли уже водитель этого пассажира
+                rating_exists = await session.execute(
+                    select(Rating).where(
+                        Rating.order_id == last_completed.id,
+                        Rating.rater_id == driver.id,
+                        Rating.rated_user_id == passenger_id
                     )
+                )
+                
+                if not rating_exists.scalar_one_or_none():
+                    # Получаем имя пассажира
+                    passenger_result = await session.execute(
+                        select(User).where(User.id == passenger_id)
+                    )
+                    passenger = passenger_result.scalar_one_or_none()
                     
-                    if not rating_exists.scalar_one_or_none():
-                        passenger_result = await session.execute(
-                            select(User).where(User.id == passenger_id)
-                        )
-                        passenger = passenger_result.scalar_one_or_none()
+                    if passenger:
+                        local_date = utc_to_local(last_completed.date)
                         
-                        if passenger:
-                            local_date = utc_to_local(last_completed.date)
-                            keyboard = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [InlineKeyboardButton(
-                                        text=f"⭐ Оценить пассажира {passenger.full_name}",
-                                        callback_data=f"rate_passenger:{last_completed.id}:{passenger.id}"
-                                    )]
-                                ]
-                            )
-                            await callback.message.answer(
-                                f"📝 **Оцените пассажира из последней поездки**\n\n"
-                                f"📍 {last_completed.from_city} → {last_completed.to_city}\n"
-                                f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n"
-                                f"👤 Пассажир: {passenger.full_name}\n"
-                                f"🪑 Забронировано мест: {seats_count}\n\n"
-                                f"Как прошла поездка? Оцените пассажира!",
-                                parse_mode="Markdown",
-                                reply_markup=keyboard
-                            )
+                        # Находим количество мест для этого пассажира
+                        seats_count = 1
+                        if last_completed.booked_passengers:
+                            for p in last_completed.booked_passengers:
+                                if isinstance(p, dict) and p.get('id') == passenger_id:
+                                    seats_count = p.get('seats', 1)
+                                    break
+                                elif p == passenger_id:
+                                    seats_count = 1
+                                    break
+                        
+                        keyboard = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(
+                                    text=f"⭐ Оценить пассажира {passenger.full_name}",
+                                    callback_data=f"rate_passenger:{last_completed.id}:{passenger.id}"
+                                )]
+                            ]
+                        )
+                        await callback.message.answer(
+                            f"📝 **Оцените пассажира из последней поездки**\n\n"
+                            f"📍 {last_completed.from_city} → {last_completed.to_city}\n"
+                            f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n"
+                            f"👤 Пассажир: {passenger.full_name}\n"
+                            f"🪑 Забронировано мест: {seats_count}\n\n"
+                            f"Как прошла поездка? Оцените пассажира!",
+                            parse_mode="Markdown",
+                            reply_markup=keyboard
+                        )
     
     await callback.answer()
 
