@@ -121,11 +121,11 @@ async def show_filters_menu(message: Message, state: FSMContext, edit: bool = Tr
             callback_data="disabled"
         )])
     
-    # Кнопка возврата в главное меню
-    keyboard.append([InlineKeyboardButton(
-        text="◀️ В главное меню", 
-        callback_data="back_to_main"
-    )])
+    # УБРАНО: кнопка возврата в главное меню
+    # keyboard.append([InlineKeyboardButton(
+    #     text="◀️ В главное меню", 
+    #     callback_data="back_to_main"
+    # )])
     
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
@@ -344,16 +344,17 @@ async def back_to_filters(callback: CallbackQuery, state: FSMContext):
     await show_filters_menu(callback.message, state)
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery, state: FSMContext):
-    """Возврат в главное меню"""
-    await state.clear()
-    await callback.message.answer(
-        "👋 **Главное меню**",
-        parse_mode="Markdown",
-        reply_markup=get_passenger_main_menu()
-    )
-    await callback.answer()
+# УДАЛЕН обработчик back_to_main, так как кнопка больше не используется
+# @router.callback_query(lambda c: c.data == "back_to_main")
+# async def back_to_main(callback: CallbackQuery, state: FSMContext):
+#     """Возврат в главное меню"""
+#     await state.clear()
+#     await callback.message.answer(
+#         "👋 **Главное меню**",
+#         parse_mode="Markdown",
+#         reply_markup=get_passenger_main_menu()
+#     )
+#     await callback.answer()
 
 @router.callback_query(lambda c: c.data == "disabled")
 async def disabled_button(callback: CallbackQuery):
@@ -416,13 +417,14 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
                 parse_mode="Markdown"
             )
             
-            # Кнопка нового поиска
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
-                ]
-            )
-            await callback.message.answer("Хотите попробовать снова?", reply_markup=keyboard)
+            # УБРАНО: кнопка нового поиска
+            # keyboard = InlineKeyboardMarkup(
+            #     inline_keyboard=[
+            #         [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
+            #     ]
+            # )
+            # await callback.message.answer("Хотите попробовать снова?", reply_markup=keyboard)
+            
             await callback.answer()
             return
         
@@ -476,16 +478,16 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
             
             await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         
-        # Кнопка нового поиска
-        new_search_keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
-            ]
-        )
-        await callback.message.answer(
-            "Хотите выполнить новый поиск?",
-            reply_markup=new_search_keyboard
-        )
+        # УБРАНО: кнопка нового поиска в конце
+        # new_search_keyboard = InlineKeyboardMarkup(
+        #     inline_keyboard=[
+        #         [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
+        #     ]
+        # )
+        # await callback.message.answer(
+        #     "Хотите выполнить новый поиск?",
+        #     reply_markup=new_search_keyboard
+        # )
     
     await callback.answer()
 
