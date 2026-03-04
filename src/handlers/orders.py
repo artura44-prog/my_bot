@@ -318,7 +318,7 @@ async def process_time(message: Message, state: FSMContext):
     data = await state.get_data()
     date = data.get('date')
     
-    # Создаем локальный datetime
+    # Создаем локальный datetime (наивный)
     local_dt = datetime(
         year=date.year,
         month=date.month,
@@ -327,13 +327,17 @@ async def process_time(message: Message, state: FSMContext):
         minute=minutes
     )
 
-        # === НОВАЯ ПРОВЕРКА: время не может быть в прошлом ===
-    now_local = datetime.now()  # текущее локальное время
-    if local_dt < now_local:
+    # === ИСПРАВЛЕННАЯ ПРОВЕРКА ===
+    now_utc = get_utc_now()
+    local_dt_utc = local_to_utc(local_dt)  # конвертируем в UTC для сравнения
+    now_local = utc_to_local(now_utc)  # для отображения пользователю
+    
+    if local_dt_utc < now_utc:
         await message.answer(
-            "❌ Нельзя создать поездку в прошлом!\n"
-            f"Текущее время: {now_local.strftime('%d.%m.%Y %H:%M')}\n"
-            f"Введите будущее время.",
+            f"❌ Нельзя создать поездку в прошлом!\n\n"
+            f"🕐 Текущее время: {now_local.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📅 Вы указали: {local_dt.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"Пожалуйста, укажите будущее время.",
             parse_mode="Markdown",
             reply_markup=get_cancel_keyboard()
         )
@@ -347,7 +351,6 @@ async def process_time(message: Message, state: FSMContext):
     role = data.get('role')
     
     if role == UserRole.DRIVER:
-        # Для водителя спрашиваем цену за одного пассажира
         await message.answer(
             "💰 Введите **стоимость поездки для одного пассажира** (в рублях):\n"
             "Например: 500",
@@ -355,7 +358,6 @@ async def process_time(message: Message, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
     else:
-        # Для пассажира спрашиваем общую цену
         await message.answer(
             "💰 Введите **общую стоимость поездки** (в рублях):\n"
             "Например: 500",
@@ -364,6 +366,7 @@ async def process_time(message: Message, state: FSMContext):
         )
     
     await state.set_state(OrderStates.waiting_for_price)
+
 
 @router.message(OrderStates.waiting_for_price)
 async def process_price(message: Message, state: FSMContext):
