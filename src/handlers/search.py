@@ -481,6 +481,7 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
                 Order.status == OrderStatus.ACTIVE,
                 Order.from_city.ilike(f"%{from_city}%"),
                 Order.to_city.ilike(f"%{to_city}%"),
+                 Order.date >= now_utc,  # ← ДОБАВЛЕНО! Только будущие поездки
                 Order.date >= utc_start,
                 Order.date <= utc_end
             ).order_by(Order.date)

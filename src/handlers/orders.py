@@ -326,6 +326,18 @@ async def process_time(message: Message, state: FSMContext):
         hour=hours,
         minute=minutes
     )
+
+        # === НОВАЯ ПРОВЕРКА: время не может быть в прошлом ===
+    now_local = datetime.now()  # текущее локальное время
+    if local_dt < now_local:
+        await message.answer(
+            "❌ Нельзя создать поездку в прошлом!\n"
+            f"Текущее время: {now_local.strftime('%d.%m.%Y %H:%M')}\n"
+            f"Введите будущее время.",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
     
     # Конвертируем в UTC для сохранения в БД
     utc_dt = local_to_utc(local_dt)
