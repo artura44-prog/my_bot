@@ -437,8 +437,9 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
         )
         
         for order in orders:
-            # Получаем информацию о водителе
+            # Получаем информацию о водителе и его машине
             driver_info = "Информация недоступна"
+            car_info = ""
             if order.customer_id:
                 driver_result = await session.execute(
                     select(User).where(User.id == order.customer_id)
@@ -446,18 +447,23 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
                 driver = driver_result.scalar_one_or_none()
                 if driver:
                     driver_info = f"{driver.full_name}, ⭐ {driver.rating:.1f}"
-            
+                    if driver.car_model and driver.car_plate:
+                        car_info = f"🚘 Авто: {driver.car_model} ({driver.car_plate})"
+
             local_date = utc_to_local(order.date)
-            
+            available = order.available_seats
+
+            # Формируем текст по новому шаблону
             text = (
-                f"🚗 **Предложение водителя**\n\n"
                 f"📍 **Маршрут:** {order.from_city} → {order.to_city}\n"
-                f"📅 **Дата:** {local_date.strftime('%d.%m.%Y')}\n"
-                f"⏰ **Время:** {local_date.strftime('%H:%M')}\n"
+                f"📅 **Дата:** {local_date.strftime('%d.%m.%Y %H:%M')}\n"
                 f"💰 **Цена:** {order.price} руб./чел.\n"
-                f"🪑 **Свободно мест:** {order.available_seats}/{order.total_seats}\n"
+                f"🪑 **Свободно мест:** {available}/{order.total_seats}  🪑 **Мест на заднем ряду:** {order.seats_back_row or 'не указано'}\n"
                 f"👤 **Водитель:** {driver_info}\n"
             )
+
+            if car_info:
+                text += f"{car_info}\n"
             
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[

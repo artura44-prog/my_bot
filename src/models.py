@@ -60,6 +60,7 @@ class Order(Base):
     
     total_seats = Column(Integer, nullable=False)
     booked_seats = Column(Integer, default=0)
+    seats_back_row = Column(Integer, nullable=True)  # НОВОЕ ПОЛЕ
 
     booked_passengers = Column(JSON, default=list) 
     

@@ -128,9 +128,10 @@ async def passenger_history(callback: CallbackQuery):
         completed_orders_list = []  # Сохраняем завершённые заказы для последующей обработки
         
         for order in orders:
-            # Получаем информацию о водителе
+            # Получаем информацию о водителе и машине
             driver_name = "Неизвестен"
             driver_rating = 0
+            car_info = ""
             if order.customer_id:
                 driver_result = await session.execute(
                     select(User).where(User.id == order.customer_id)
@@ -139,7 +140,9 @@ async def passenger_history(callback: CallbackQuery):
                 if driver:
                     driver_name = driver.full_name
                     driver_rating = driver.rating
-            
+                    if driver.car_model and driver.car_plate:
+                        car_info = f"🚘 Авто: {driver.car_model} ({driver.car_plate})"
+
             local_date = utc_to_local(order.date)
             
             # Находим, сколько мест забронировал этот пассажир
@@ -153,12 +156,17 @@ async def passenger_history(callback: CallbackQuery):
                         seats_count = 1
                         break
             
+            # Формируем информацию о поездке
             trip_info = (
                 f"📍 {order.from_city} → {order.to_city}\n"
                 f"📅 {local_date.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🚗 Водитель: {driver_name} ⭐ {driver_rating:.1f}\n"
-                f"💰 {order.price} руб. × {seats_count} мест = {order.price * seats_count} руб.\n\n"
+                f"💰 {order.price} руб. × {seats_count} мест = {order.price * seats_count} руб.\n"
             )
+
+            if car_info:
+                trip_info += f"{car_info}\n"
+
+            trip_info += "\n"
             
             if order.status == OrderStatus.COMPLETED:
                 completed_text += trip_info
