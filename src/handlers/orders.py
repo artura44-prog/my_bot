@@ -493,6 +493,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
     required_fields = ['from_city', 'to_city', 'utc_datetime', 'price']
     if role == UserRole.DRIVER:
         required_fields.append('total_seats')
+        required_fields.append('seats_back_row')  # ✅ ДОБАВЛЕНО!
     
     for field in required_fields:
         if field not in data:
@@ -525,7 +526,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
         if role == UserRole.DRIVER:
             order.total_seats = data['total_seats']
             order.booked_seats = 0
-            # seats_back_row больше не используется
+            order.seats_back_row = data['seats_back_row']  # ✅ ДОБАВЛЕНО!
         
         session.add(order)
         await session.commit()
@@ -544,6 +545,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
             f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"💰 Цена за пассажира: {data['price']} руб.\n"
             f"🪑 Всего мест: {data['total_seats']}\n\n"
+            f"🪑 Мест на заднем ряду: {data['seats_back_row']}\n\n"  # ✅ ДОБАВЛЕНО!
             f"🔍 Теперь пассажиры смогут найти ваше предложение!"
         )
         menu = get_driver_main_menu()
