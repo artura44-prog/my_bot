@@ -11,6 +11,7 @@ from src.models import User, UserRole, Order, OrderStatus
 from src.utils.encryption import phone_encryptor
 from src.utils.time_utils import format_datetime, get_utc_now, utc_to_local, local_to_utc
 from src.keyboards.main import get_passenger_main_menu
+from src.utils.cities import CITIES, CITY_SYNONYMS
 
 router = Router()
 
@@ -21,8 +22,8 @@ class MessageStates(StatesGroup):
 
 # НОВЫЕ состояния для фильтров поиска
 class SearchFiltersStates(StatesGroup):
-    waiting_for_from = State()      # Ожидание города отправления
-    waiting_for_to = State()        # Ожидание города назначения
+    waiting_for_from = State()      # Ожидание города отправления (ручной ввод)
+    waiting_for_to = State()        # Ожидание города назначения (ручной ввод)
     waiting_for_date = State()      # Ожидание даты
 
 # ==================== НОВЫЙ ФУНКЦИОНАЛ ПОИСКА С ФИЛЬТРАМИ ====================
@@ -121,95 +122,187 @@ async def show_filters_menu(message: Message, state: FSMContext, edit: bool = Tr
             callback_data="disabled"
         )])
     
-    # УБРАНО: кнопка возврата в главное меню
-    # keyboard.append([InlineKeyboardButton(
-    #     text="◀️ В главное меню", 
-    #     callback_data="back_to_main"
-    # )])
-    
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
-    # ИСПРАВЛЕНО: добавляем try-except для обработки ошибок редактирования
     try:
         if edit:
             await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
         else:
             await message.answer(text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        # Если не удалось отредактировать, отправляем новое сообщение
         await message.answer(text, parse_mode="Markdown", reply_markup=markup)
     
 
-# --- Обработчики установки фильтров ---
+# --- Обработчики установки города отправления (с выбором из списка) ---
 
 @router.callback_query(lambda c: c.data == "set_from")
 async def set_from_city(callback: CallbackQuery, state: FSMContext):
-    """Установка города отправления"""
-    await callback.message.edit_text(
-        "📍 Введите **город отправления**:\n"
-        "Например: Уфа, Стерлитамак, Салават",
-        parse_mode="Markdown"
-    )
+    """Установка города отправления с выбором из списка"""
+    
+    # Создаем клавиатуру с городами (по 2 в ряд)
+    cities_keyboard = []
+    row = []
+    
+    for i, city in enumerate(CITIES, 1):
+        row.append(InlineKeyboardButton(
+            text=city, 
+            callback_data=f"select_from_city:{city}"
+        ))
+        
+        # Каждые 2 города - новый ряд
+        if i % 2 == 0 or i == len(CITIES):
+            cities_keyboard.append(row)
+            row = []
+    
+    # Добавляем ручной ввод для других городов
+    cities_keyboard.append([
+        InlineKeyboardButton(text="✏️ Другой город", callback_data="manual_from_city")
+    ])
     
     # Кнопка отмены
+    cities_keyboard.append([
+        InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")
+    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=cities_keyboard)
+    
+    await callback.message.edit_text(
+        "📍 Выберите **город отправления**:\n\n"
+        "Или нажмите 'Другой город' для ручного ввода",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("select_from_city:"))
+async def select_from_city(callback: CallbackQuery, state: FSMContext):
+    """Выбор города из списка"""
+    city = callback.data.split(":")[1]
+    
+    await state.update_data(from_city=city)
+    await show_filters_menu(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "manual_from_city")
+async def manual_from_city(callback: CallbackQuery, state: FSMContext):
+    """Ручной ввод города отправления"""
+    await callback.message.edit_text(
+        "📍 Введите **город отправления** вручную:\n"
+        "(Например: Уфа, Стерлитамак, Салават)\n\n"
+        "❗️ Проверьте правильность написания"
+    )
+    
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")]
+            [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="set_from")]
         ]
     )
     await callback.message.answer("Введите название города:", reply_markup=keyboard)
     await state.set_state(SearchFiltersStates.waiting_for_from)
     await callback.answer()
 
-@router.message(SearchFiltersStates.waiting_for_from)
-async def process_from_city(message: Message, state: FSMContext):
-    """Обработка введенного города отправления"""
-    from_city = message.text.strip()
-    
-    if len(from_city) < 3:
-        await message.answer(
-            "❌ Название города слишком короткое!\n"
-            "Пожалуйста, введите корректное название (минимум 3 символа):"
-        )
-        return
-    
-    await state.update_data(from_city=from_city)
-    # ИСПРАВЛЕНО: используем edit=False для новых сообщений
-    await show_filters_menu(message, state, edit=False)
+# --- Обработчики установки города назначения (с выбором из списка) ---
 
 @router.callback_query(lambda c: c.data == "set_to")
 async def set_to_city(callback: CallbackQuery, state: FSMContext):
-    """Установка города назначения"""
+    """Установка города назначения с выбором из списка"""
+    
+    cities_keyboard = []
+    row = []
+    
+    for i, city in enumerate(CITIES, 1):
+        row.append(InlineKeyboardButton(
+            text=city, 
+            callback_data=f"select_to_city:{city}"
+        ))
+        
+        if i % 2 == 0 or i == len(CITIES):
+            cities_keyboard.append(row)
+            row = []
+    
+    cities_keyboard.append([
+        InlineKeyboardButton(text="✏️ Другой город", callback_data="manual_to_city")
+    ])
+    cities_keyboard.append([
+        InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")
+    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=cities_keyboard)
+    
     await callback.message.edit_text(
-        "🏁 Введите **город назначения**:\n"
-        "Например: Акъяр, Магнитогорск, Сибай",
-        parse_mode="Markdown"
+        "🏁 Выберите **город назначения**:\n\n"
+        "Или нажмите 'Другой город' для ручного ввода",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("select_to_city:"))
+async def select_to_city(callback: CallbackQuery, state: FSMContext):
+    """Выбор города из списка"""
+    city = callback.data.split(":")[1]
+    
+    await state.update_data(to_city=city)
+    await show_filters_menu(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "manual_to_city")
+async def manual_to_city(callback: CallbackQuery, state: FSMContext):
+    """Ручной ввод города назначения"""
+    await callback.message.edit_text(
+        "🏁 Введите **город назначения** вручную:\n"
+        "(Например: Акъяр, Магнитогорск, Сибай)\n\n"
+        "❗️ Проверьте правильность написания"
     )
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Отмена", callback_data="back_to_filters")]
+            [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="set_to")]
         ]
     )
     await callback.message.answer("Введите название города:", reply_markup=keyboard)
     await state.set_state(SearchFiltersStates.waiting_for_to)
     await callback.answer()
 
-@router.message(SearchFiltersStates.waiting_for_to)
-async def process_to_city(message: Message, state: FSMContext):
-    """Обработка введенного города назначения"""
-    to_city = message.text.strip()
+# --- Обработчики ручного ввода городов (с нормализацией) ---
+
+@router.message(SearchFiltersStates.waiting_for_from)
+async def process_from_city(message: Message, state: FSMContext):
+    """Обработка введенного вручную города отправления"""
+    from_city = message.text.strip()
     
-    if len(to_city) < 3:
+    # Проверяем, есть ли в словаре синонимов
+    normalized_city = CITY_SYNONYMS.get(from_city.lower(), from_city)
+    
+    if len(normalized_city) < 3:
         await message.answer(
             "❌ Название города слишком короткое!\n"
             "Пожалуйста, введите корректное название (минимум 3 символа):"
         )
         return
     
-    await state.update_data(to_city=to_city)
-    # ИСПРАВЛЕНО: используем edit=False для новых сообщений
+    await state.update_data(from_city=normalized_city)
     await show_filters_menu(message, state, edit=False)
+
+@router.message(SearchFiltersStates.waiting_for_to)
+async def process_to_city(message: Message, state: FSMContext):
+    """Обработка введенного вручную города назначения"""
+    to_city = message.text.strip()
+    
+    # Проверяем, есть ли в словаре синонимов
+    normalized_city = CITY_SYNONYMS.get(to_city.lower(), to_city)
+    
+    if len(normalized_city) < 3:
+        await message.answer(
+            "❌ Название города слишком короткое!\n"
+            "Пожалуйста, введите корректное название (минимум 3 символа):"
+        )
+        return
+    
+    await state.update_data(to_city=normalized_city)
+    await show_filters_menu(message, state, edit=False)
+
+# --- Обработчики установки даты (без изменений) ---
 
 @router.callback_query(lambda c: c.data == "set_date")
 async def set_date(callback: CallbackQuery, state: FSMContext):
@@ -312,7 +405,6 @@ async def process_manual_date(message: Message, state: FSMContext):
             return
         
         await state.update_data(date=selected_date)
-        # ИСПРАВЛЕНО: используем edit=False для новых сообщений
         await show_filters_menu(message, state, edit=False)
     except ValueError:
         await message.answer(
@@ -343,18 +435,6 @@ async def back_to_filters(callback: CallbackQuery, state: FSMContext):
     """Возврат к меню фильтров"""
     await show_filters_menu(callback.message, state)
     await callback.answer()
-
-# УДАЛЕН обработчик back_to_main, так как кнопка больше не используется
-# @router.callback_query(lambda c: c.data == "back_to_main")
-# async def back_to_main(callback: CallbackQuery, state: FSMContext):
-#     """Возврат в главное меню"""
-#     await state.clear()
-#     await callback.message.answer(
-#         "👋 **Главное меню**",
-#         parse_mode="Markdown",
-#         reply_markup=get_passenger_main_menu()
-#     )
-#     await callback.answer()
 
 @router.callback_query(lambda c: c.data == "disabled")
 async def disabled_button(callback: CallbackQuery):
@@ -417,14 +497,6 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
                 parse_mode="Markdown"
             )
             
-            # УБРАНО: кнопка нового поиска
-            # keyboard = InlineKeyboardMarkup(
-            #     inline_keyboard=[
-            #         [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
-            #     ]
-            # )
-            # await callback.message.answer("Хотите попробовать снова?", reply_markup=keyboard)
-            
             await callback.answer()
             return
         
@@ -483,17 +555,6 @@ async def perform_search(callback: CallbackQuery, state: FSMContext):
             )
             
             await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
-        
-        # УБРАНО: кнопка нового поиска в конце
-        # new_search_keyboard = InlineKeyboardMarkup(
-        #     inline_keyboard=[
-        #         [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="back_to_filters")]
-        #     ]
-        # )
-        # await callback.message.answer(
-        #     "Хотите выполнить новый поиск?",
-        #     reply_markup=new_search_keyboard
-        # )
     
     await callback.answer()
 
