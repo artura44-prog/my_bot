@@ -18,8 +18,8 @@ router = Router()
 class OrderStates(StatesGroup):
     waiting_for_from = State()      # Откуда (выбор из списка)
     waiting_for_to = State()         # Куда (выбор из списка)
-    waiting_for_date = State()       # Дата (ручной ввод)
-    waiting_for_time = State()       # Время (ручной ввод)
+    waiting_for_date = State()       # Дата (выбор из календаря)
+    waiting_for_time = State()       # Время (выбор из слотов)
     waiting_for_price = State()      # Цена
     waiting_for_seats = State()      # Количество мест
     waiting_for_back_seats = State() # Мест на заднем ряду
@@ -91,7 +91,7 @@ async def show_from_city_menu(message: Message, state: FSMContext):
     for i, city in enumerate(CITIES, 1):
         row.append(InlineKeyboardButton(
             text=city, 
-            callback_data=f"order_select_from_city:{city}"  # ИЗМЕНЕНО!
+            callback_data=f"order_select_from_city:{city}"
         ))
         
         # Каждые 2 города - новый ряд
@@ -113,7 +113,7 @@ async def show_from_city_menu(message: Message, state: FSMContext):
     )
     await state.set_state(OrderStates.waiting_for_from)
 
-@router.callback_query(lambda c: c.data.startswith("order_select_from_city:"))  # ИЗМЕНЕНО!
+@router.callback_query(lambda c: c.data.startswith("order_select_from_city:"))
 async def order_select_from_city(callback: CallbackQuery, state: FSMContext):
     """Выбор города отправления из списка (для водителей)"""
     city = callback.data.split(":")[1]
@@ -132,7 +132,7 @@ async def show_to_city_menu(message: Message, state: FSMContext):
     for i, city in enumerate(CITIES, 1):
         row.append(InlineKeyboardButton(
             text=city, 
-            callback_data=f"order_select_to_city:{city}"  # ИЗМЕНЕНО!
+            callback_data=f"order_select_to_city:{city}"
         ))
         
         if i % 2 == 0 or i == len(CITIES):
@@ -153,7 +153,7 @@ async def show_to_city_menu(message: Message, state: FSMContext):
     )
     await state.set_state(OrderStates.waiting_for_to)
 
-@router.callback_query(lambda c: c.data.startswith("order_select_to_city:"))  # ИЗМЕНЕНО!
+@router.callback_query(lambda c: c.data.startswith("order_select_to_city:"))
 async def order_select_to_city(callback: CallbackQuery, state: FSMContext):
     """Выбор города назначения из списка (для водителей)"""
     city = callback.data.split(":")[1]
@@ -172,16 +172,8 @@ async def order_select_to_city(callback: CallbackQuery, state: FSMContext):
     await state.update_data(to_city=city)
     await callback.message.edit_text(f"✅ Город назначения: **{city}**")
     
-    # Переходим к следующему шагу (дата)
-    await callback.message.answer(
-        "📅 Введите **дату поездки** в формате ДД.ММ.ГГГГ\n"
-        "Например: 25.12.2026\n\n"
-        "⚠️ Дата должна быть не раньше сегодняшнего дня",
-        parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(OrderStates.waiting_for_date)
-    
+    # Переходим к выбору даты (календарь)
+    await show_date_calendar(callback.message, state)
     await callback.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_from_menu")
@@ -214,34 +206,64 @@ async def cancel_order_creation(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
-# ==================== ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ====================
+# ==================== НОВЫЕ ФУНКЦИИ ДЛЯ ВЫБОРА ДАТЫ (КАЛЕНДАРЬ) ====================
 
-@router.message(OrderStates.waiting_for_date)
-async def process_date(message: Message, state: FSMContext):
-    """Обработка даты с проверкой на АКТИВНЫЙ заказ"""
-    # Проверка отмены
-    if await check_cancel(message, state):
-        return
+async def show_date_calendar(message: Message, state: FSMContext):
+    """Показать календарь для выбора даты (7 дней)"""
     
-    date_str = message.text.strip()
+    today = datetime.now().date()
+    dates_keyboard = []
+    
+    # Дни недели на русском
+    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    
+    # Кнопки для выбора даты (7 дней вперед, по 3 в ряд)
+    for i in range(0, 7, 3):
+        row = []
+        for j in range(3):
+            day_offset = i + j
+            if day_offset < 7:
+                date = today + timedelta(days=day_offset)
+                date_str = f"{weekdays[date.weekday()]} {date.strftime('%d.%m')}"
+                row.append(InlineKeyboardButton(
+                    text=date_str, 
+                    callback_data=f"order_select_date:{date.strftime('%d.%m.%Y')}"
+                ))
+        dates_keyboard.append(row)
+    
+    # Кнопки навигации
+    dates_keyboard.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_to_menu"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order_creation")
+    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=dates_keyboard)
+    
+    await message.answer(
+        "📅 **Выберите дату поездки**:",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    await state.set_state(OrderStates.waiting_for_date)
+
+@router.callback_query(lambda c: c.data.startswith("order_select_date:"))
+async def order_select_date(callback: CallbackQuery, state: FSMContext):
+    """Выбор даты из календаря"""
+    date_str = callback.data.split(":")[1]
     
     try:
-        date = datetime.strptime(date_str, "%d.%m.%Y")
+        selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
         
         # Проверяем, что дата не в прошлом
-        today_utc = get_utc_now().date()
-        if date.date() < today_utc:
-            await message.answer(
-                "❌ Дата не может быть в прошлом!\n"
-                "Введите будущую дату:",
-                reply_markup=get_cancel_keyboard()
-            )
+        today = datetime.now().date()
+        if selected_date < today:
+            await callback.answer("❌ Нельзя выбрать прошедшую дату!", show_alert=True)
             return
         
         # Проверка на дубликат активного заказа
         async with AsyncSessionLocal() as session:
             user_result = await session.execute(
-                select(User).where(User.telegram_id == message.from_user.id)
+                select(User).where(User.telegram_id == callback.from_user.id)
             )
             user = user_result.scalar_one_or_none()
             
@@ -250,7 +272,7 @@ async def process_date(message: Message, state: FSMContext):
                     select(Order).where(
                         Order.customer_id == user.id,
                         Order.status == OrderStatus.ACTIVE,
-                        func.date(Order.date) == date.date()
+                        func.date(Order.date) == selected_date
                     )
                 )
                 existing_active_order = existing_active_order_result.scalar_one_or_none()
@@ -260,14 +282,9 @@ async def process_date(message: Message, state: FSMContext):
                     new_from = data.get('from_city', '?')
                     new_to = data.get('to_city', '?')
                     
-                    await message.answer(
-                        f"❌ **У вас уже есть АКТИВНЫЙ заказ на эту дату!**\n\n"
-                        f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
-                        f"📍 Маршрут активного заказа: {existing_active_order.from_city} → {existing_active_order.to_city}\n"
-                        f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
-                        f"Вы можете создать только **один АКТИВНЫЙ заказ в день**.",
-                        parse_mode="Markdown",
-                        reply_markup=get_cancel_keyboard()
+                    await callback.answer(
+                        "❌ У вас уже есть активный заказ на эту дату!",
+                        show_alert=True
                     )
                     return
                 
@@ -275,125 +292,153 @@ async def process_date(message: Message, state: FSMContext):
                     select(Order).where(
                         Order.customer_id == user.id,
                         Order.status == OrderStatus.CANCELLED,
-                        func.date(Order.date) == date.date()
+                        func.date(Order.date) == selected_date
                     )
                 )
                 existing_cancelled_orders = existing_cancelled_orders_result.scalars().all()
                 
                 if existing_cancelled_orders:
-                    first_cancelled = existing_cancelled_orders[0]
-                    data = await state.get_data()
-                    new_from = data.get('from_city', '?')
-                    new_to = data.get('to_city', '?')
+                    # Просто информируем, не блокируем
                     cancelled_count = len(existing_cancelled_orders)
-                    count_text = f" (всего {cancelled_count})" if cancelled_count > 1 else ""
-                    
-                    await message.answer(
-                        f"ℹ️ **На эту дату был отменённый заказ**{count_text}\n\n"
-                        f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
-                        f"📍 Отменённый маршрут: {first_cancelled.from_city} → {first_cancelled.to_city}\n"
-                        f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
-                        f"Вы можете создать новый заказ, так как старый был отменён.",
-                        parse_mode="Markdown"
+                    await callback.answer(
+                        f"На эту дату был отменённый заказ (всего {cancelled_count})",
+                        show_alert=False
                     )
         
-        await state.update_data(date=date)
+        await state.update_data(date=selected_date)
+        await callback.message.edit_text(f"✅ Выбрана дата: **{selected_date.strftime('%d.%m.%Y')}**")
+        
+        # Переходим к выбору времени
+        await show_time_slots(callback.message, state)
         
     except ValueError:
-        await message.answer(
-            "❌ Неверный формат даты!\n"
-            "Используйте формат ДД.ММ.ГГГГ\n"
-            "Например: 25.12.2026",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
+        await callback.answer("❌ Ошибка в дате", show_alert=True)
+    
+    await callback.answer()
+
+# ==================== НОВЫЕ ФУНКЦИИ ДЛЯ ВЫБОРА ВРЕМЕНИ (СЛОТЫ) ====================
+
+def get_time_slots_keyboard():
+    """Клавиатура с готовыми слотами времени (каждый час)"""
+    keyboard = [
+        # Утро (8-11)
+        [
+            InlineKeyboardButton(text="🌅 08:00", callback_data="order_select_time:8:0"),
+            InlineKeyboardButton(text="🌅 09:00", callback_data="order_select_time:9:0"),
+            InlineKeyboardButton(text="🌅 10:00", callback_data="order_select_time:10:0")
+        ],
+        # День (11-14)
+        [
+            InlineKeyboardButton(text="☀️ 11:00", callback_data="order_select_time:11:0"),
+            InlineKeyboardButton(text="☀️ 12:00", callback_data="order_select_time:12:0"),
+            InlineKeyboardButton(text="☀️ 13:00", callback_data="order_select_time:13:0")
+        ],
+        # День/Вечер (14-17)
+        [
+            InlineKeyboardButton(text="☀️ 14:00", callback_data="order_select_time:14:0"),
+            InlineKeyboardButton(text="🌆 15:00", callback_data="order_select_time:15:0"),
+            InlineKeyboardButton(text="🌆 16:00", callback_data="order_select_time:16:0")
+        ],
+        # Вечер (17-20)
+        [
+            InlineKeyboardButton(text="🌆 17:00", callback_data="order_select_time:17:0"),
+            InlineKeyboardButton(text="🌙 18:00", callback_data="order_select_time:18:0"),
+            InlineKeyboardButton(text="🌙 19:00", callback_data="order_select_time:19:0")
+        ],
+        # Ночь (20-23)
+        [
+            InlineKeyboardButton(text="🌙 20:00", callback_data="order_select_time:20:0"),
+            InlineKeyboardButton(text="🌙 21:00", callback_data="order_select_time:21:0"),
+            InlineKeyboardButton(text="🌙 22:00", callback_data="order_select_time:22:0")
+        ],
+        # Навигация
+        [
+            InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_date"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order_creation")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+async def show_time_slots(message: Message, state: FSMContext):
+    """Показать выбор времени из слотов"""
     
     await message.answer(
-        "⏰ Введите **время поездки** в формате ЧЧ:ММ\n"
-        "Например: 09:30",
+        "⏰ **Выберите время поездки**:",
         parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_time_slots_keyboard()
     )
     await state.set_state(OrderStates.waiting_for_time)
 
-@router.message(OrderStates.waiting_for_time)
-async def process_time(message: Message, state: FSMContext):
-    """Обработка времени"""
-    # Проверка отмены
-    if await check_cancel(message, state):
-        return
-    
-    time_str = message.text.strip()
-    
-    if len(time_str) != 5 or time_str[2] != ":":
-        await message.answer(
-            "❌ Неверный формат времени!\n"
-            "Используйте формат ЧЧ:ММ\n"
-            "Например: 09:30",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
+@router.callback_query(lambda c: c.data.startswith("order_select_time:"))
+async def order_select_time(callback: CallbackQuery, state: FSMContext):
+    """Выбор времени из слотов"""
     try:
-        hours = int(time_str[:2])
-        minutes = int(time_str[3:])
-        if hours < 0 or hours > 23 or minutes < 0 or minutes > 59:
-            raise ValueError
-    except ValueError:
-        await message.answer(
-            "❌ Неверное время!\n"
-            "Часы (00-23) и минуты (00-59)\n"
-            "Например: 09:30",
-            reply_markup=get_cancel_keyboard()
+        _, hour_str, minute_str = callback.data.split(":")
+        hour = int(hour_str)
+        minute = int(minute_str)
+        
+        # Получаем дату из состояния
+        data = await state.get_data()
+        date = data.get('date')
+        
+        if not date:
+            await callback.answer("❌ Сначала выберите дату!", show_alert=True)
+            return
+        
+        # Создаем локальный datetime
+        local_dt = datetime(
+            year=date.year,
+            month=date.month,
+            day=date.day,
+            hour=hour,
+            minute=minute
         )
-        return
+        
+        # Проверяем, что время не в прошлом
+        now_utc = get_utc_now()
+        local_dt_utc = local_to_utc(local_dt)
+        
+        if local_dt_utc < now_utc:
+            await callback.answer(
+                "❌ Это время уже прошло! Выберите другое.",
+                show_alert=True
+            )
+            return
+        
+        # Конвертируем в UTC для сохранения
+        utc_dt = local_to_utc(local_dt)
+        await state.update_data(utc_datetime=utc_dt)
+        
+        # Показываем подтверждение
+        time_str = f"{hour:02d}:{minute:02d}"
+        await callback.message.edit_text(
+            f"✅ Выбрано время: **{time_str}**"
+        )
+        
+        # Переходим к следующему шагу (цена)
+        await ask_price(callback.message, state)
+        
+    except Exception as e:
+        await callback.answer("❌ Ошибка выбора времени", show_alert=True)
     
-    data = await state.get_data()
-    date = data.get('date')
-    
-    local_dt = datetime(
-        year=date.year,
-        month=date.month,
-        day=date.day,
-        hour=hours,
-        minute=minutes
-    )
+    await callback.answer()
 
-    now_utc = get_utc_now()
-    local_dt_utc = local_to_utc(local_dt)
-    now_local = utc_to_local(now_utc)
-    
-    if local_dt_utc < now_utc:
-        await message.answer(
-            f"❌ Нельзя создать поездку в прошлом!\n\n"
-            f"🕐 Текущее время: {now_local.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📅 Вы указали: {local_dt.strftime('%d.%m.%Y %H:%M')}\n\n"
-            f"Пожалуйста, укажите будущее время.",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    utc_dt = local_to_utc(local_dt)
-    await state.update_data(utc_datetime=utc_dt)
-    
-    role = data.get('role')
-    
-    if role == UserRole.DRIVER:
-        await message.answer(
-            "💰 Введите **стоимость поездки для одного пассажира** (в рублях):\n"
-            "Например: 500",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard()
-        )
-    else:
-        await message.answer(
-            "💰 Введите **общую стоимость поездки** (в рублях):\n"
-            "Например: 500",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard()
-        )
-    
+@router.callback_query(lambda c: c.data == "back_to_date")
+async def back_to_date(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору даты"""
+    await show_date_calendar(callback.message, state)
+    await callback.answer()
+
+# ==================== ФУНКЦИИ ДЛЯ ЦЕНЫ И ДАЛЬШЕ ====================
+
+async def ask_price(message: Message, state: FSMContext):
+    """Запрос цены"""
+    await message.answer(
+        "💰 Введите **стоимость поездки для одного пассажира** (в рублях):\n"
+        "Например: 500",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
     await state.set_state(OrderStates.waiting_for_price)
 
 @router.message(OrderStates.waiting_for_price)
@@ -420,19 +465,13 @@ async def process_price(message: Message, state: FSMContext):
     
     await state.update_data(price=price)
     
-    data = await state.get_data()
-    role = data.get('role')
-    
-    if role == UserRole.DRIVER:
-        await message.answer(
-            "🪑 Сколько **всего мест** для пассажиров в машине?\n"
-            "Введите число (например: 4, 5, 7):",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(OrderStates.waiting_for_seats)
-    else:
-        await message.answer("❌ Функция для пассажиров в разработке")
+    await message.answer(
+        "🪑 Сколько **всего мест** для пассажиров в машине?\n"
+        "Введите число (например: 4, 5, 7):",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_seats)
 
 @router.message(OrderStates.waiting_for_seats)
 async def process_seats(message: Message, state: FSMContext):
@@ -511,8 +550,7 @@ async def process_back_seats(message: Message, state: FSMContext):
     
     await state.update_data(seats_back_row=back_seats)
     
-    role = data.get('role')
-    await save_order(message, state, role)
+    await save_order(message, state, UserRole.DRIVER)
 
 async def save_order(message: Message, state: FSMContext, role: UserRole):
     """Сохранение заказа в базу данных"""
@@ -557,31 +595,20 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
     
     await state.clear()
     
-    if role == UserRole.DRIVER:
-        confirmation_text = (
-            f"✅ **Заказ водителя успешно создан!**\n\n"
-            f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
-            f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
-            f"💰 Цена за пассажира: {data['price']} руб.\n"
-            f"🪑 Всего мест: {data['total_seats']}\n\n"
-            f"🪑 Мест на заднем ряду: {data['seats_back_row']}\n\n"
-            f"🔍 Теперь пассажиры смогут найти ваше предложение!"
-        )
-        menu = get_driver_main_menu()
-    else:
-        confirmation_text = (
-            f"✅ **Заказ пассажира успешно создан!**\n\n"
-            f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
-            f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
-            f"💰 Общая стоимость: {data['price']} руб.\n\n"
-            f"🔍 Теперь водители смогут найти ваш заказ!"
-        )
-        menu = get_passenger_main_menu()
+    confirmation_text = (
+        f"✅ **Заказ водителя успешно создан!**\n\n"
+        f"📍 Маршрут: {data['from_city']} → {data['to_city']}\n"
+        f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
+        f"💰 Цена за пассажира: {data['price']} руб.\n"
+        f"🪑 Всего мест: {data['total_seats']}\n\n"
+        f"🪑 Мест на заднем ряду: {data['seats_back_row']}\n\n"
+        f"🔍 Теперь пассажиры смогут найти ваше предложение!"
+    )
     
     await message.answer(
         confirmation_text,
         parse_mode="Markdown",
-        reply_markup=menu
+        reply_markup=get_driver_main_menu()
     )
 
 @router.message(F.text == "❌ Отмена")
