@@ -1,27 +1,28 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, Date, func
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.database import AsyncSessionLocal
 from src.models import User, UserRole, Order, OrderStatus
 from src.keyboards.main import get_cancel_keyboard, get_passenger_main_menu, get_driver_main_menu
 from src.utils.time_utils import parse_datetime, get_utc_now, format_datetime, utc_to_local, local_to_utc
+from src.utils.cities import CITIES, CITY_SYNONYMS
 
 router = Router()
 
-# Состояния для создания заказа
+# Состояния для создания заказа - ТОЛЬКО для создания заказа!
 class OrderStates(StatesGroup):
-    waiting_for_from = State()      # Откуда
-    waiting_for_to = State()         # Куда
-    waiting_for_date = State()       # Дата
-    waiting_for_time = State()       # Время
+    waiting_for_from = State()      # Откуда (выбор из списка)
+    waiting_for_to = State()         # Куда (выбор из списка)
+    waiting_for_date = State()       # Дата (ручной ввод)
+    waiting_for_time = State()       # Время (ручной ввод)
     waiting_for_price = State()      # Цена
-    waiting_for_seats = State()      # Количество мест (только для водителя)
-    waiting_for_back_seats = State() # Мест на заднем ряду (только для водителя)
+    waiting_for_seats = State()      # Количество мест
+    waiting_for_back_seats = State() # Мест на заднем ряду
 
 # ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТМЕНЫ ==========
 async def check_cancel(message: Message, state: FSMContext) -> bool:
@@ -61,7 +62,7 @@ async def cmd_create_order(message: Message, state: FSMContext, **kwargs):
         )
         active_orders = active_orders_result.scalars().all()
         
-        # Проверка 1: не больше 2 активных заказов
+        # Проверка: не больше 2 активных заказов
         if len(active_orders) >= 2:
             await message.answer(
                 "❌ **Превышен лимит активных заказов!**\n\n"
@@ -75,92 +76,104 @@ async def cmd_create_order(message: Message, state: FSMContext, **kwargs):
     # Сохраняем роль пользователя в состояние
     await state.update_data(role=user.role)
     
-    # Начинаем сбор данных
+    # Показываем меню выбора города отправления
+    await show_from_city_menu(message, state)
+
+# ==================== ФУНКЦИИ ДЛЯ ВЫБОРА ГОРОДОВ ====================
+
+async def show_from_city_menu(message: Message, state: FSMContext):
+    """Показать меню выбора города отправления"""
+    
+    # Создаем клавиатуру с городами (по 2 в ряд)
+    cities_keyboard = []
+    row = []
+    
+    for i, city in enumerate(CITIES, 1):
+        row.append(InlineKeyboardButton(
+            text=city, 
+            callback_data=f"order_select_from_city:{city}"  # ИЗМЕНЕНО!
+        ))
+        
+        # Каждые 2 города - новый ряд
+        if i % 2 == 0 or i == len(CITIES):
+            cities_keyboard.append(row)
+            row = []
+    
+    # Кнопка отмены
+    cities_keyboard.append([
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order_creation")
+    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=cities_keyboard)
+    
     await message.answer(
-        "📍 **Создание заказа**\n\n"
-        "Введите **город отправления**:\n"
-        "(Например: Уфа, Стерлитамак, Салават)",
+        "📍 **Выберите город отправления**:",
         parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=markup
     )
     await state.set_state(OrderStates.waiting_for_from)
 
-@router.message(OrderStates.waiting_for_from)
-async def process_from(message: Message, state: FSMContext):
-    """Обработка города отправления"""
-    # Проверка отмены
-    if await check_cancel(message, state):
-        return
+@router.callback_query(lambda c: c.data.startswith("order_select_from_city:"))  # ИЗМЕНЕНО!
+async def order_select_from_city(callback: CallbackQuery, state: FSMContext):
+    """Выбор города отправления из списка (для водителей)"""
+    city = callback.data.split(":")[1]
     
-    from_city = message.text.strip()
+    await state.update_data(from_city=city)
+    await callback.message.edit_text(f"✅ Город отправления: **{city}**")
+    await show_to_city_menu(callback.message, state)
+    await callback.answer()
+
+async def show_to_city_menu(message: Message, state: FSMContext):
+    """Показать меню выбора города назначения"""
     
-    # Проверяем, что город не пустой
-    if not from_city:
-        await message.answer(
-            "❌ Город отправления не может быть пустым!\n"
-            "Введите название населенного пункта:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
+    cities_keyboard = []
+    row = []
     
-    # Проверяем минимальную длину (например, "Уфа" - 3 символа)
-    if len(from_city) < 3:
-        await message.answer(
-            "❌ Название города слишком короткое!\n"
-            "Введите корректное название:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
+    for i, city in enumerate(CITIES, 1):
+        row.append(InlineKeyboardButton(
+            text=city, 
+            callback_data=f"order_select_to_city:{city}"  # ИЗМЕНЕНО!
+        ))
+        
+        if i % 2 == 0 or i == len(CITIES):
+            cities_keyboard.append(row)
+            row = []
     
-    await state.update_data(from_city=from_city)
+    cities_keyboard.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_from_menu"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order_creation")
+    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=cities_keyboard)
     
     await message.answer(
-        "📍 Введите **город назначения**:\n"
-        "(Например: Акъяр, Магнитогорск, Сибай)",
+        "🏁 **Выберите город назначения**:",
         parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=markup
     )
     await state.set_state(OrderStates.waiting_for_to)
 
-@router.message(OrderStates.waiting_for_to)
-async def process_to(message: Message, state: FSMContext):
-    """Обработка города назначения"""
-    # Проверка отмены
-    if await check_cancel(message, state):
-        return
+@router.callback_query(lambda c: c.data.startswith("order_select_to_city:"))  # ИЗМЕНЕНО!
+async def order_select_to_city(callback: CallbackQuery, state: FSMContext):
+    """Выбор города назначения из списка (для водителей)"""
+    city = callback.data.split(":")[1]
     
-    to_city = message.text.strip()
-    
-    # Проверяем, что город не пустой
-    if not to_city:
-        await message.answer(
-            "❌ Город назначения не может быть пустым!\n"
-            "Введите название населенного пункта:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    if len(to_city) < 3:
-        await message.answer(
-            "❌ Название города слишком короткое!\n"
-            "Введите корректное название:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    # Проверяем, что города разные
+    # Проверяем, что город не совпадает с городом отправления
     data = await state.get_data()
-    if to_city.lower() == data.get('from_city', '').lower():
-        await message.answer(
-            f"❌ Город назначения ('{to_city}') совпадает с городом отправления ('{data.get('from_city')}')!\n"
-            "Введите другой город назначения:",
-            reply_markup=get_cancel_keyboard()
+    from_city = data.get('from_city')
+    
+    if city.lower() == from_city.lower():
+        await callback.answer(
+            "❌ Город назначения не может совпадать с городом отправления!",
+            show_alert=True
         )
         return
     
-    await state.update_data(to_city=to_city)
+    await state.update_data(to_city=city)
+    await callback.message.edit_text(f"✅ Город назначения: **{city}**")
     
-    await message.answer(
+    # Переходим к следующему шагу (дата)
+    await callback.message.answer(
         "📅 Введите **дату поездки** в формате ДД.ММ.ГГГГ\n"
         "Например: 25.12.2026\n\n"
         "⚠️ Дата должна быть не раньше сегодняшнего дня",
@@ -168,6 +181,40 @@ async def process_to(message: Message, state: FSMContext):
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(OrderStates.waiting_for_date)
+    
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "back_to_from_menu")
+async def back_to_from_menu(callback: CallbackQuery, state: FSMContext):
+    """Возврат к меню выбора города отправления"""
+    await show_from_city_menu(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "cancel_order_creation")
+async def cancel_order_creation(callback: CallbackQuery, state: FSMContext):
+    """Отмена создания заказа через callback"""
+    await state.clear()
+    
+    # Проверяем, зарегистрирован ли пользователь
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        
+        if user and user.role == UserRole.DRIVER:
+            await callback.message.edit_text(
+                "❌ Создание заказа отменено."
+            )
+            await callback.message.answer(
+                "🚗 **Главное меню водителя**",
+                parse_mode="Markdown",
+                reply_markup=get_driver_main_menu()
+            )
+    
+    await callback.answer()
+
+# ==================== ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ====================
 
 @router.message(OrderStates.waiting_for_date)
 async def process_date(message: Message, state: FSMContext):
@@ -179,10 +226,9 @@ async def process_date(message: Message, state: FSMContext):
     date_str = message.text.strip()
     
     try:
-        # Пробуем распарсить дату
         date = datetime.strptime(date_str, "%d.%m.%Y")
         
-        # Проверяем, что дата не в прошлом (используем UTC для сравнения)
+        # Проверяем, что дата не в прошлом
         today_utc = get_utc_now().date()
         if date.date() < today_utc:
             await message.answer(
@@ -192,16 +238,14 @@ async def process_date(message: Message, state: FSMContext):
             )
             return
         
-        # === ИСПРАВЛЕННАЯ ПРОВЕРКА: ищем только АКТИВНЫЕ заказы ===
+        # Проверка на дубликат активного заказа
         async with AsyncSessionLocal() as session:
-            # Получаем пользователя
             user_result = await session.execute(
                 select(User).where(User.telegram_id == message.from_user.id)
             )
             user = user_result.scalar_one_or_none()
             
             if user and user.role == UserRole.DRIVER:
-                # Проверяем, есть ли АКТИВНЫЙ заказ на эту дату
                 existing_active_order_result = await session.execute(
                     select(Order).where(
                         Order.customer_id == user.id,
@@ -212,7 +256,6 @@ async def process_date(message: Message, state: FSMContext):
                 existing_active_order = existing_active_order_result.scalar_one_or_none()
                 
                 if existing_active_order:
-                    # Получаем данные из состояния для нового заказа
                     data = await state.get_data()
                     new_from = data.get('from_city', '?')
                     new_to = data.get('to_city', '?')
@@ -222,14 +265,12 @@ async def process_date(message: Message, state: FSMContext):
                         f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
                         f"📍 Маршрут активного заказа: {existing_active_order.from_city} → {existing_active_order.to_city}\n"
                         f"📍 Ваш новый маршрут: {new_from} → {new_to}\n\n"
-                        f"Вы можете создать только **один АКТИВНЫЙ заказ в день**.\n"
-                        f"Чтобы создать новый заказ, сначала отмените или дождитесь завершения существующего.",
+                        f"Вы можете создать только **один АКТИВНЫЙ заказ в день**.",
                         parse_mode="Markdown",
                         reply_markup=get_cancel_keyboard()
                     )
                     return
                 
-                # Проверяем, есть ли ОТМЕНЁННЫЕ заказы на эту дату (просто для информации)
                 existing_cancelled_orders_result = await session.execute(
                     select(Order).where(
                         Order.customer_id == user.id,
@@ -240,14 +281,10 @@ async def process_date(message: Message, state: FSMContext):
                 existing_cancelled_orders = existing_cancelled_orders_result.scalars().all()
                 
                 if existing_cancelled_orders:
-                    # Берём первый отменённый заказ для примера
                     first_cancelled = existing_cancelled_orders[0]
-                    
-                    # Информируем, но НЕ БЛОКИРУЕМ создание нового заказа
                     data = await state.get_data()
                     new_from = data.get('from_city', '?')
                     new_to = data.get('to_city', '?')
-                    
                     cancelled_count = len(existing_cancelled_orders)
                     count_text = f" (всего {cancelled_count})" if cancelled_count > 1 else ""
                     
@@ -260,7 +297,6 @@ async def process_date(message: Message, state: FSMContext):
                         parse_mode="Markdown"
                     )
         
-        # Если всё хорошо - сохраняем дату и идём дальше
         await state.update_data(date=date)
         
     except ValueError:
@@ -289,7 +325,6 @@ async def process_time(message: Message, state: FSMContext):
     
     time_str = message.text.strip()
     
-    # Проверка формата ЧЧ:ММ
     if len(time_str) != 5 or time_str[2] != ":":
         await message.answer(
             "❌ Неверный формат времени!\n"
@@ -299,7 +334,6 @@ async def process_time(message: Message, state: FSMContext):
         )
         return
     
-    # Проверяем, что часы и минуты - числа
     try:
         hours = int(time_str[:2])
         minutes = int(time_str[3:])
@@ -314,11 +348,9 @@ async def process_time(message: Message, state: FSMContext):
         )
         return
     
-    # Получаем дату из состояния
     data = await state.get_data()
     date = data.get('date')
     
-    # Создаем локальный datetime (наивный)
     local_dt = datetime(
         year=date.year,
         month=date.month,
@@ -327,10 +359,9 @@ async def process_time(message: Message, state: FSMContext):
         minute=minutes
     )
 
-    # === ИСПРАВЛЕННАЯ ПРОВЕРКА ===
     now_utc = get_utc_now()
-    local_dt_utc = local_to_utc(local_dt)  # конвертируем в UTC для сравнения
-    now_local = utc_to_local(now_utc)  # для отображения пользователю
+    local_dt_utc = local_to_utc(local_dt)
+    now_local = utc_to_local(now_utc)
     
     if local_dt_utc < now_utc:
         await message.answer(
@@ -343,11 +374,9 @@ async def process_time(message: Message, state: FSMContext):
         )
         return
     
-    # Конвертируем в UTC для сохранения в БД
     utc_dt = local_to_utc(local_dt)
     await state.update_data(utc_datetime=utc_dt)
     
-    # Получаем роль из состояния
     role = data.get('role')
     
     if role == UserRole.DRIVER:
@@ -367,11 +396,9 @@ async def process_time(message: Message, state: FSMContext):
     
     await state.set_state(OrderStates.waiting_for_price)
 
-
 @router.message(OrderStates.waiting_for_price)
 async def process_price(message: Message, state: FSMContext):
     """Обработка цены"""
-    # Проверка отмены
     if await check_cancel(message, state):
         return
     
@@ -393,12 +420,10 @@ async def process_price(message: Message, state: FSMContext):
     
     await state.update_data(price=price)
     
-    # Получаем роль
     data = await state.get_data()
     role = data.get('role')
     
     if role == UserRole.DRIVER:
-        # Для водителя спрашиваем количество мест
         await message.answer(
             "🪑 Сколько **всего мест** для пассажиров в машине?\n"
             "Введите число (например: 4, 5, 7):",
@@ -407,13 +432,11 @@ async def process_price(message: Message, state: FSMContext):
         )
         await state.set_state(OrderStates.waiting_for_seats)
     else:
-        # Для пассажира пока недоступно (только водители)
         await message.answer("❌ Функция для пассажиров в разработке")
 
 @router.message(OrderStates.waiting_for_seats)
 async def process_seats(message: Message, state: FSMContext):
-    """Обработка количества мест (для водителя)"""
-    # Проверка отмены
+    """Обработка количества мест"""
     if await check_cancel(message, state):
         return
     
@@ -428,7 +451,7 @@ async def process_seats(message: Message, state: FSMContext):
             )
             return
         
-        if seats > 20:  # Разумное ограничение
+        if seats > 20:
             await message.answer(
                 "❌ Слишком много мест! Максимум 20.\n"
                 "Введите корректное число:",
@@ -448,7 +471,7 @@ async def process_seats(message: Message, state: FSMContext):
     await message.answer(
         f"🪑 Сколько **мест на заднем ряду**?\n"
         f"Всего мест: {seats}\n"
-        f"⚠️ Значение должно быть меньше общего количества мест:",
+        f"⚠️ Введите число меньше общего количества мест:",
         parse_mode="Markdown",
         reply_markup=get_cancel_keyboard()
     )
@@ -457,18 +480,15 @@ async def process_seats(message: Message, state: FSMContext):
 @router.message(OrderStates.waiting_for_back_seats)
 async def process_back_seats(message: Message, state: FSMContext):
     """Обработка мест на заднем ряду"""
-    # Проверка отмены
     if await check_cancel(message, state):
         return
     
     try:
         back_seats = int(message.text.strip())
         
-        # Получаем общее количество мест
         data = await state.get_data()
         total_seats = data.get('total_seats', 0)
         
-        # Проверяем, что места на заднем ряду меньше общего количества
         if back_seats <= 0:
             await message.answer(
                 "❌ Количество мест должно быть больше 0!\n"
@@ -479,36 +499,29 @@ async def process_back_seats(message: Message, state: FSMContext):
             
         if back_seats >= total_seats:
             await message.answer(
-                f"❌ Мест на заднем ряду ({back_seats}) должно быть меньше общего количества мест ({total_seats})!\n"
+                f"❌ Мест на заднем ряду должно быть меньше общего количества мест ({total_seats})!\n"
                 f"Введите число меньше {total_seats}:",
                 reply_markup=get_cancel_keyboard()
             )
             return
             
     except ValueError:
-        await message.answer(
-            "❌ Введите число",
-            reply_markup=get_cancel_keyboard()
-        )
+        await message.answer("❌ Введите число")
         return
     
     await state.update_data(seats_back_row=back_seats)
     
-    # Получаем роль
-    data = await state.get_data()
     role = data.get('role')
-    
     await save_order(message, state, role)
 
 async def save_order(message: Message, state: FSMContext, role: UserRole):
     """Сохранение заказа в базу данных"""
     data = await state.get_data()
     
-    # Проверяем обязательные поля
     required_fields = ['from_city', 'to_city', 'utc_datetime', 'price']
     if role == UserRole.DRIVER:
         required_fields.append('total_seats')
-        required_fields.append('seats_back_row')  # ✅ ДОБАВЛЕНО!
+        required_fields.append('seats_back_row')
     
     for field in required_fields:
         if field not in data:
@@ -517,42 +530,33 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
             return
     
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя
         user_result = await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = user_result.scalar_one()
         
-        # Проверка НЕ НУЖНА - она уже выполнена в process_date!
-        # (комментарий, код удалён)
-        
-        # Создаем заказ с UTC временем
         order = Order(
             order_type=role,
             from_city=data['from_city'],
             to_city=data['to_city'],
-            date=data['utc_datetime'],  # Сохраняем UTC время
+            date=data['utc_datetime'],
             price=data['price'],
             customer_id=user.id,
             status=OrderStatus.ACTIVE
         )
         
-        # Добавляем поля для водителя
         if role == UserRole.DRIVER:
             order.total_seats = data['total_seats']
             order.booked_seats = 0
-            order.seats_back_row = data['seats_back_row']  # ✅ ДОБАВЛЕНО!
+            order.seats_back_row = data['seats_back_row']
         
         session.add(order)
         await session.commit()
         
-        # Получаем локальное время для отображения
         local_datetime = utc_to_local(data['utc_datetime'])
     
-    # Очищаем состояние
     await state.clear()
     
-    # Формируем текст подтверждения с локальным временем
     if role == UserRole.DRIVER:
         confirmation_text = (
             f"✅ **Заказ водителя успешно создан!**\n\n"
@@ -560,7 +564,7 @@ async def save_order(message: Message, state: FSMContext, role: UserRole):
             f"📅 Дата: {local_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"💰 Цена за пассажира: {data['price']} руб.\n"
             f"🪑 Всего мест: {data['total_seats']}\n\n"
-            f"🪑 Мест на заднем ряду: {data['seats_back_row']}\n\n"  # ✅ ДОБАВЛЕНО!
+            f"🪑 Мест на заднем ряду: {data['seats_back_row']}\n\n"
             f"🔍 Теперь пассажиры смогут найти ваше предложение!"
         )
         menu = get_driver_main_menu()
@@ -585,7 +589,6 @@ async def cancel_order(message: Message, state: FSMContext):
     """Отмена создания заказа и возврат в главное меню"""
     await state.clear()
     
-    # Проверяем, зарегистрирован ли пользователь
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
@@ -593,7 +596,6 @@ async def cancel_order(message: Message, state: FSMContext):
         user = result.scalar_one_or_none()
         
         if user:
-            # Если пользователь зарегистрирован, показываем его меню
             if user.role == UserRole.DRIVER:
                 await message.answer(
                     "❌ Создание заказа отменено.\n\n"
@@ -609,7 +611,6 @@ async def cancel_order(message: Message, state: FSMContext):
                     reply_markup=get_passenger_main_menu()
                 )
         else:
-            # Если пользователь не зарегистрирован, показываем общее меню
             from src.keyboards.main import get_main_menu
             await message.answer(
                 "❌ Создание заказа отменено.\n\n"
