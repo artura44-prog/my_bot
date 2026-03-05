@@ -82,3 +82,60 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="◀️ Назад", callback_data="back")
     return builder.as_markup()
+# ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ КАРТОЧЕК ПОЛЬЗОВАТЕЛЕЙ ==========
+
+def get_back_to_profile_keyboard():
+    """Клавиатура для возврата в профиль"""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад в профиль", callback_data="back_to_profile")]
+        ]
+    )
+    return keyboard
+
+def get_reviews_navigation_keyboard(review_type: str, offset: int, limit: int, has_more: bool):
+    """Клавиатура для навигации по отзывам"""
+    buttons = []
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if offset > 0:
+        nav_buttons.append(InlineKeyboardButton(
+            text="◀️ Назад", 
+            callback_data=f"reviews_prev:{review_type}:{offset - limit}"
+        ))
+    if has_more:
+        nav_buttons.append(InlineKeyboardButton(
+            text="Вперёд ▶️", 
+            callback_data=f"reviews_next:{review_type}:{offset + limit}"
+        ))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Кнопка назад в профиль
+   # buttons.append([InlineKeyboardButton(text="◀️ Назад в профиль", callback_data="back_to_profile")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_driver_card_actions_keyboard(driver_id: int, viewer_id: int):
+    """Клавиатура с действиями из карточки водителя"""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Все отзывы", callback_data=f"all_driver_reviews:{driver_id}")],
+            [InlineKeyboardButton(text="📞 Связаться", callback_data=f"contact_driver_from_card:{driver_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_search")]
+        ]
+    )
+    return keyboard
+
+def get_passenger_card_actions_keyboard(passenger_id: int, viewer_id: int):
+    """Клавиатура с действиями из карточки пассажира"""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Все отзывы", callback_data=f"all_passenger_reviews:{passenger_id}")],
+            [InlineKeyboardButton(text="📞 Связаться", callback_data=f"contact_passenger_from_card:{passenger_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_orders")]
+        ]
+    )
+    return keyboard
