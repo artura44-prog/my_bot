@@ -115,3 +115,20 @@ class Rating(Base):
     def __repr__(self):
         return f"<Rating(id={self.id}, score={self.score})>"
 
+# Добавьте после модели Rating
+
+class SupportMessage(Base):
+    __tablename__ = 'support_messages'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
+    user = relationship("User", foreign_keys=[user_id], backref="support_messages")
+    
+    message = Column(Text, nullable=False)
+    is_from_admin = Column(Boolean, default=False)  # False = от пользователя, True = от админа
+    is_read = Column(Boolean, default=False)  # Прочитано ли админом
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<SupportMessage(id={self.id}, user_id={self.user_id}, is_from_admin={self.is_from_admin})>"
