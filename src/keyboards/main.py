@@ -66,7 +66,7 @@ def get_profile_inline_keyboard(user_id: int, role: UserRole) -> InlineKeyboardM
     else:
         builder.button(text="📋 Мои заказы", callback_data=f"my_orders:{user_id}")
 
-    builder.adjust(2)  # по 2 кнопки в ряд
+    builder.adjust(2, 2) # по 2 кнопки в ряд
     return builder.as_markup()
 
 def get_delete_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup:
