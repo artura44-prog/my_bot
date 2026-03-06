@@ -41,6 +41,7 @@ class User(Base):
     orders_as_driver = relationship("Order", foreign_keys="Order.driver_id", back_populates="driver")
     given_ratings = relationship("Rating", foreign_keys="Rating.rater_id", back_populates="rater")
     received_ratings = relationship("Rating", foreign_keys="Rating.rated_user_id", back_populates="rated_user")
+    support_messages = relationship("SupportMessage", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, name={self.full_name}, role={self.role})>"
@@ -60,15 +61,13 @@ class Order(Base):
     
     total_seats = Column(Integer, nullable=False)
     booked_seats = Column(Integer, default=0)
-    seats_back_row = Column(Integer, nullable=True)  # НОВОЕ ПОЛЕ
+    seats_back_row = Column(Integer, nullable=True)
 
     booked_passengers = Column(JSON, default=list) 
     
-    # ИСПРАВЛЕНО: добавил ondelete="SET NULL" и nullable=True
     customer_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
     customer = relationship("User", foreign_keys=[customer_id], back_populates="orders_as_customer")
     
-    # ИСПРАВЛЕНО: добавил ondelete="SET NULL" (уже было nullable=True)
     driver_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
     driver = relationship("User", foreign_keys=[driver_id], back_populates="orders_as_driver")
     
@@ -92,11 +91,9 @@ class Rating(Base):
     
     id = Column(Integer, primary_key=True)
     
-    # ИСПРАВЛЕНО: добавил ondelete="SET NULL" и nullable=True
     rater_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
     rater = relationship("User", foreign_keys=[rater_id], back_populates="given_ratings")
     
-    # ИСПРАВЛЕНО: добавил ondelete="SET NULL" и nullable=True
     rated_user_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
     rated_user = relationship("User", foreign_keys=[rated_user_id], back_populates="received_ratings")
     
@@ -115,18 +112,17 @@ class Rating(Base):
     def __repr__(self):
         return f"<Rating(id={self.id}, score={self.score})>"
 
-# Добавьте после модели Rating
-
+# Модель сообщений поддержки
 class SupportMessage(Base):
     __tablename__ = 'support_messages'
     
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
-    user = relationship("User", foreign_keys=[user_id], backref="support_messages")
+    user = relationship("User", foreign_keys=[user_id], back_populates="support_messages")
     
     message = Column(Text, nullable=False)
-    is_from_admin = Column(Boolean, default=False)  # False = от пользователя, True = от админа
-    is_read = Column(Boolean, default=False)  # Прочитано ли админом
+    is_from_admin = Column(Boolean, default=False)
+    is_read = Column(Boolean, default=False)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     

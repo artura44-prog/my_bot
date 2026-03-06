@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
-from src.models import User, UserRole, Order, OrderStatus, Rating
+from src.models import User, UserRole, Order, OrderStatus, Rating, SupportMessage
 from src.keyboards.main import (
     get_passenger_main_menu, 
     get_driver_main_menu, 
@@ -719,8 +719,25 @@ async def confirm_delete_account(callback: CallbackQuery):
             await callback.answer("❌ Ошибка!")
             return
         
+        # Добавляем логирование для отладки
+        print(f"🔍 Удаление пользователя ID: {user.id}, telegram_id: {user.telegram_id}")
+        
+        # Проверяем, есть ли сообщения поддержки
+        support_msgs = await session.execute(
+            select(SupportMessage).where(SupportMessage.user_id == user.id)
+        )
+        msgs = support_msgs.scalars().all()
+        print(f"📨 Найдено сообщений поддержки: {len(msgs)}")
+        
+        # Явно удаляем сообщения (хотя cascade должен сработать)
+        for msg in msgs:
+            await session.delete(msg)
+        
+        # Удаляем пользователя
         await session.delete(user)
         await session.commit()
+        
+        print(f"✅ Пользователь {user.id} успешно удалён")
         
         await callback.message.edit_text(
             "✅ **Аккаунт успешно удален!**\n\n"
