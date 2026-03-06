@@ -49,7 +49,7 @@ async def cmd_register(message: Message, state: FSMContext):
     # Начинаем регистрацию
     await message.answer(
         "📝 **Регистрация нового пользователя**\n\n"
-        "Введите ваше полное имя (ФИО):",
+        "Введите ваше имя или ник:",
         parse_mode="Markdown"
     )
     await state.set_state(RegistrationStates.waiting_for_name)
