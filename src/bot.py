@@ -14,7 +14,8 @@ from src.handlers import (
     passenger_trips,
     search,  # ← ЭТОТ ИМПОРТ
     driver_orders,
-    ratings
+    ratings,
+    support,
 )
 from src.handlers.check_auth import check_registration, get_user_role, registration_required
 from src.database import init_db, AsyncSessionLocal
@@ -52,6 +53,7 @@ dp.include_router(passenger_trips.router)
 dp.include_router(search.router)
 dp.include_router(driver_orders.router) 
 dp.include_router(ratings.router)
+dp.include_router(support.router) 
 
 @dp.message(Command("start"))
 @rate_limit("start")  # 5 раз в минуту
@@ -110,17 +112,13 @@ async def handle_car_button(message: Message, **kwargs):
     from src.handlers.profile import show_car
     await show_car(message)
 
-@dp.message(lambda message: message.text == "📞 Поддержка")
-@rate_limit("support")  # 5 раз в минуту
-async def handle_support(message: Message,  **kwargs):
-    """Обработчик кнопки Поддержка (доступна без регистрации)"""
-    await message.answer(
-        "📞 **Поддержка**\n\n"
-        "По всем вопросам обращайтесь:\n"
-        "@admin_username\n\n"
-        "Или напишите на email: support@example.com",
-        parse_mode="Markdown"
-    )
+#@dp.message(lambda message: message.text == "📞 Поддержка")
+#@rate_limit("support")  # 5 раз в минуту
+#async def handle_support(message: Message, **kwargs):
+#    await message.answer(
+#        "✅ Сообщение отправлено!\n\n"
+#        "Администратор ответит вам в ближайшее время."
+#    )
 
 @dp.message(lambda message: message.text == "📝 Регистрация")
 @rate_limit("register")  # 5 раз в час

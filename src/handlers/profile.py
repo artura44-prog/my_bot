@@ -447,15 +447,15 @@ async def show_car(message: Message):
         else:
             await message.answer("❌ Информация об авто не заполнена!")
 
-@router.message(F.text == "📞 Поддержка")
-async def support(message: Message):
-    """Связаться с поддержкой"""
-    await message.answer(
-        "📞 **Поддержка**\n\n"
-        "По всем вопросам обращайтесь:\n"
-        "@admin_username\n\n"
-        "Или напишите на email: support@example.com"
-    )
+#@router.message(F.text == "📞 Поддержка")
+#async def support(message: Message):
+#    """Связаться с поддержкой"""
+#    await message.answer(
+#        "📞 **Поддержка**\n\n"
+#        "По всем вопросам обращайтесь:\n"
+#        "@admin_username\n\n"
+#        "Или напишите на email: support@example.com"
+#    )
 
 @router.callback_query(lambda c: c.data.startswith("delete_account:"))
 async def process_delete_account(callback: CallbackQuery):

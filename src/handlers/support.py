@@ -1,12 +1,12 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, case
 from datetime import datetime
 
 from src.database import AsyncSessionLocal
 from src.models import User, SupportMessage
-from src.config import ADMIN_IDS  # нужно добавить в config.py
+from src.config import ADMIN_IDS
 
 router = Router()
 
@@ -54,7 +54,7 @@ async def support_start(message: Message):
         # Формируем текст с историей
         if history:
             history_text = "\n\n📜 **История переписки:**\n"
-            for msg in reversed(history):  # Переворачиваем, чтобы шли по порядку
+            for msg in reversed(history):
                 sender = "👤 Вы" if not msg.is_from_admin else "🛠 Админ"
                 time_str = msg.created_at.strftime("%d.%m %H:%M")
                 history_text += f"\n{sender} [{time_str}]:\n{msg.message}\n"
@@ -67,7 +67,7 @@ async def support_start(message: Message):
             parse_mode="Markdown"
         )
 
-@router.message(F.text, ~F.text.startswith('/'))  # Все текстовые сообщения, не начинающиеся с /
+@router.message(F.text, ~F.text.startswith('/'))
 async def handle_support_message(message: Message):
     """Обработка сообщений в поддержку"""
     
@@ -82,7 +82,7 @@ async def handle_support_message(message: Message):
             await message.answer("❌ Сначала зарегистрируйтесь через /start")
             return
         
-        # Проверка на спам (не больше MAX_MESSAGES_PER_DAY)
+        # Проверка на спам
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         messages_today = await session.execute(
             select(func.count(SupportMessage.id)).where(
@@ -111,18 +111,16 @@ async def handle_support_message(message: Message):
         session.add(support_msg)
         await session.commit()
         
-        # Отправляем подтверждение пользователю
+        # Отправляем подтверждение пользователю (исправлено: убраны символы Markdown)
         await message.answer(
-            "✅ **Сообщение отправлено!**\n\n"
+            "✅ Сообщение отправлено!\n\n"
             "Администратор ответит вам в ближайшее время.\n"
-            "Вы можете продолжать писать - вся история сохранится.",
-            parse_mode="Markdown"
+            "Вы можете продолжать писать - вся история сохранится."
         )
         
         # Уведомляем всех администраторов
         for admin_id in ADMIN_IDS:
             try:
-                # Получаем username пользователя для ссылки
                 username = f"@{user.username}" if user.username else f"ID {user.telegram_id}"
                 
                 await message.bot.send_message(
@@ -208,7 +206,6 @@ async def list_tickets(message: Message):
                 f"💬 `/history {ticket.user_id}`\n\n"
             )
         
-        # Разбиваем на части, если слишком длинно
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await message.answer(text[i:i+4000], parse_mode="Markdown")
@@ -233,7 +230,6 @@ async def show_history(message: Message):
         return
     
     async with AsyncSessionLocal() as session:
-        # Получаем информацию о пользователе
         user_result = await session.execute(
             select(User).where(User.telegram_id == user_id)
         )
@@ -243,7 +239,6 @@ async def show_history(message: Message):
             await message.answer("❌ Пользователь не найден")
             return
         
-        # Получаем историю сообщений
         history_result = await session.execute(
             select(SupportMessage).where(
                 SupportMessage.user_id == user.id
@@ -255,13 +250,11 @@ async def show_history(message: Message):
             await message.answer(f"📭 Нет сообщений с пользователем {user.full_name}")
             return
         
-        # Отмечаем все как прочитанные
         for msg in messages:
             if not msg.is_from_admin and not msg.is_read:
                 msg.is_read = True
         await session.commit()
         
-        # Формируем текст
         text = f"📜 **История с {user.full_name}** (ID: {user.telegram_id})\n\n"
         
         for msg in messages:
@@ -269,7 +262,6 @@ async def show_history(message: Message):
             time_str = msg.created_at.strftime('%d.%m %H:%M')
             text += f"{sender} [{time_str}]:\n{msg.message}\n\n"
         
-        # Разбиваем на части
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await message.answer(text[i:i+4000], parse_mode="Markdown")
@@ -282,7 +274,6 @@ async def reply_to_user(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     
-    # Парсим команду /reply user_id текст
     text = message.text
     parts = text.split(' ', 2)
     
@@ -305,7 +296,6 @@ async def reply_to_user(message: Message):
         return
     
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя
         user_result = await session.execute(
             select(User).where(User.telegram_id == user_telegram_id)
         )
@@ -315,18 +305,16 @@ async def reply_to_user(message: Message):
             await message.answer("❌ Пользователь не найден")
             return
         
-        # Сохраняем ответ в БД
         admin_msg = SupportMessage(
             user_id=user.id,
             message=reply_text,
             is_from_admin=True,
-            is_read=True,  # Админ свои сообщения видит сразу
+            is_read=True,
             created_at=datetime.utcnow()
         )
         session.add(admin_msg)
         await session.commit()
         
-        # Отправляем пользователю
         try:
             await message.bot.send_message(
                 user_telegram_id,
@@ -353,7 +341,6 @@ async def support_stats(message: Message):
         return
     
     async with AsyncSessionLocal() as session:
-        # Общая статистика
         total = await session.execute(select(func.count(SupportMessage.id)))
         total_count = total.scalar()
         
@@ -373,7 +360,6 @@ async def support_stats(message: Message):
         )
         today_count = today.scalar()
         
-        # Активные пользователи
         active_users = await session.execute(
             select(func.count(func.distinct(SupportMessage.user_id)))
         )
