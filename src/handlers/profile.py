@@ -125,18 +125,18 @@ async def edit_profile_start(callback: CallbackQuery):
         
         text += "\n\nЧто хотите изменить?"
 
-        # Кнопки выбора что редактировать
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="👤 Имя", callback_data=f"edit_name:{user.id}")],
-                [InlineKeyboardButton(text="📞 Телефон", callback_data=f"edit_phone:{user.id}")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_profile")]
-            ]
-        )
+        # Кнопки выбора что редактировать (БЕЗ ТЕЛЕФОНА)
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="👤 Имя", callback_data=f"edit_name:{user.id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_profile")]
+        ]
         
         # Для водителей добавляем кнопку редактирования авто
         if user.role == UserRole.DRIVER:
-            keyboard.inline_keyboard.insert(2, [InlineKeyboardButton(text="🚘 Автомобиль", callback_data=f"edit_car:{user.id}")])
+            # Вставляем перед кнопкой "Назад"
+            keyboard_buttons.insert(1, [InlineKeyboardButton(text="🚘 Автомобиль", callback_data=f"edit_car:{user.id}")])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
@@ -172,33 +172,6 @@ async def edit_name_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditProfileStates.waiting_for_name)
     await callback.answer()
 
-@router.callback_query(lambda c: c.data.startswith("edit_phone:"))
-async def edit_phone_start(callback: CallbackQuery, state: FSMContext):
-    """Начало редактирования телефона"""
-    user_id = int(callback.data.split(":")[1])
-    
-    # Сохраняем ID пользователя в состоянии
-    await state.update_data(user_id=user_id)
-    
-    await callback.message.edit_text(
-        "✏️ **Редактирование телефона**\n\n"
-        "Введите новый номер телефона в формате +7XXXXXXXXXX:",
-        parse_mode="Markdown"
-    )
-    
-    # Кнопка отмены
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Отмена", callback_data="cancel_edit")]
-        ]
-    )
-    await callback.message.answer(
-        "Введите новый телефон или нажмите Отмена:",
-        reply_markup=keyboard
-    )
-    
-    await state.set_state(EditProfileStates.waiting_for_phone)
-    await callback.answer()
 
 @router.callback_query(lambda c: c.data.startswith("edit_car:"))
 async def edit_car_start(callback: CallbackQuery, state: FSMContext):
